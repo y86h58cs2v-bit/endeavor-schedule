@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Schedule Optimizer">
+<title>Endeavor Schedule Optimizer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #f1f5f9; font-family: -apple-system, system-ui, sans-serif; }
+textarea, input { font-family: monospace; outline: none; }
+button { font-family: -apple-system, system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState } = React;
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+function tripDays(start, length) { return Array.from({ length }, (_, i) => start + i); }
+function scoreTrip(start, length, grid) { return tripDays(start, length).reduce((s, d) => s + (grid[d] || 0), 0); }
+function hasOverlap(trips) { const all = trips.flatMap(t => tripDays(t.start, t.length)); return new Set(all).size !== all.length; }
+function maxConsecutive(trips, fixedDays) {
+  const w = new Set([...trips.flatMap(t => tripDays(t.start, t.length)), ...fixedDays]);
+  let max = 0, cur = 0;
+  for (let d = 1; d <= 45; d++) { if (w.has(d)) { cur++; max = Math.max(max, cur); } else cur = 0; }
+  return max;
+}
+function parseDay(raw) { const m = String(raw).match(/(\d{1,2})/); return m ? parseInt(m[1]) : null; }
+
+// ── parsers ───────────────────────────────────────────────────────────────────
+function parseReserveGrid(text) {
+  const g = {};
+  for (const line of text.split("\n")) {
+    const parts = line.trim().split(/\t/);
+    if (parts.length < 4) continue;
+    const dm = parts[0].match(/(\d{1,2})JUL/i);
+    if (!dm) continue;
+    const day = parseInt(dm[1]), net = parseInt(parts[3]);
+    if (!isNaN(day) && !isNaN(net)) g[day] = net;
+  }
+  return g;
+}
+
+function parseRefrigeratorList(text) {
+  const lines = text.split("\n");
+  const trips = [];
+  let current = null;
+  for (const line of lines) {
+    if (/^Block|^Credit|^YTD|^Days Off/i.test(line.trim())) break;
+    const dm = line.match(/(\d{1,2})\s/);
+    if (!dm) continue;
+    const day = parseInt(dm[1]);
+    if (isNaN(day) || day > 31) continue;
+    const tm = line.match(/C\d{4,}/);
+    const hasAirport = line.match(/\s[A-Z]{3}\s*$/);
+    const isWorkingDay = tm || hasAirport;
+    if (tm) {
+      current = { code: tm[0], days: [day] };
+      trips.push(current);
+    } else if (current && isWorkingDay) {
+      const last = current.days[current.days.length - 1];
+      if (day === last + 1 || (last >= 28 && day <= 3)) {
+        current.days.push(day);
+      } else {
+        current = null;
+      }
+    } else {
+      // Blank day — end current trip
+      current = null;
+    }
+  }
+  return trips;
+}
+
+function parseOpenTime(text) {
+  const seen = new Set(), results = [];
+  for (const line of text.split("\n")) {
+    if (line.includes("TradeBoard") || line.includes("Click to view") || line.startsWith("Pairing")) continue;
+    const dm = line.match(/(\d{1,2})JUL/i);
+    if (!dm) continue;
+    const start = parseInt(dm[1]);
+    const parts = line.split("\t");
+    if (parts.length < 3) continue;
+    const length = parseInt(parts[2].trim());
+    if (isNaN(length) || length < 1 || length > 6) continue;
+    const key = `${start}x${length}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    results.push({ start, length });
+  }
+  return results.sort((a, b) => a.start - b.start || a.length - b.length);
+}
+
+// ── optimizer ─────────────────────────────────────────────────────────────────
+function optimize(grid, openTime, minDays, currentScore, fixedDays, preferOff) {
+  const safe = openTime.filter(c => !tripDays(c.start, c.length).some(d => fixedDays.includes(d)));
+  const results = [];
+  function search(index, chosen, daysUsed, scoreUsed) {
+    if (daysUsed >= minDays) {
+      if (scoreUsed <= currentScore && !hasOverlap(chosen) && maxConsecutive(chosen, fixedDays) <= 6)
+        results.push({ trips: [...chosen], score: scoreUsed });
+      return;
+    }
+    if (index >= safe.length || results.length > 500) return;
+    for (let i = index; i < safe.length; i++) {
+      const c = safe[i];
+      chosen.push(c);
+      search(i + 1, chosen, daysUsed + c.length, scoreUsed + scoreTrip(c.start, c.length, grid));
+      chosen.pop();
+    }
+  }
+  search(0, [], 0, 0);
+  const seen = new Set();
+  const unique = results.filter(r => {
+    const key = r.trips.map(t => `${t.start}x${t.length}`).sort().join("|");
+    if (seen.has(key)) return false;
+    seen.add(key); return true;
+  }).sort((a, b) => a.score - b.score);
+  unique.forEach(r => {
+    const wd = r.trips.flatMap(t => tripDays(t.start, t.length));
+    const conflicts = preferOff.filter(d => wd.includes(d));
+    r.prefSatisfied = preferOff.length > 0 ? conflicts.length === 0 : null;
+    r.prefPartial = preferOff.length > 0 ? (conflicts.length > 0 && conflicts.length < preferOff.length) : null;
+    r.prefConflicts = conflicts;
+  });
+  return unique.slice(0, 50);
+}
+
+// ── calendar ──────────────────────────────────────────────────────────────────
+const DOW = ["SU","MO","TU","WE","TH","FR","SA"];
+const COLORS = ["#2563eb","#16a34a","#9333ea","#ea580c","#0891b2","#be185d","#ca8a04"];
+
+function Calendar({ trips, fixedDays, preferOff }) {
+  const wMap = {};
+  trips.forEach((t, ti) => tripDays(t.start, t.length).forEach(d => { wMap[d] = ti; }));
+  fixedDays.forEach(d => { wMap[d] = "fixed"; });
+  const cells = [...Array(3).fill(null), ...Array.from({length:31},(_,i)=>i+1)];
+  return (
+    <div style={{marginTop:10}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3,marginBottom:6}}>
+        {DOW.map(d => <div key={d} style={{textAlign:"center",fontSize:10,color:"#6b7280",fontWeight:700}}>{d}</div>)}
+        {cells.map((d,i) => {
+          if (!d) return <div key={"e"+i}/>;
+          const ti = wMap[d];
+          const isFixed = ti==="fixed", isWork = ti!==undefined;
+          const isPref = preferOff && preferOff.includes(d);
+          const bg = isFixed?"#374151":isWork?COLORS[ti%COLORS.length]:isPref?"#fef3c7":"#f9fafb";
+          const color = (isWork||isFixed)?"#fff":isPref?"#92400e":"#374151";
+          return <div key={d} style={{background:bg,color,borderRadius:4,padding:"5px 2px",textAlign:"center",fontSize:11,fontWeight:isWork?700:400,border:(isPref&&!isWork)?"1px solid #fbbf24":"1px solid transparent"}}>{d}</div>;
+        })}
+      </div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:6,fontSize:11}}>
+        {trips.map((t,ti) => (
+          <span key={ti} style={{display:"flex",alignItems:"center",gap:4}}>
+            <span style={{width:10,height:10,borderRadius:2,background:COLORS[ti%COLORS.length],display:"inline-block"}}/>
+            {t.start}–{t.start+t.length-1} JUL ({t.length}d)
+          </span>
+        ))}
+        {fixedDays.length > 0 && <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,borderRadius:2,background:"#374151",display:"inline-block"}}/>Fixed</span>}
+        {preferOff && preferOff.length > 0 && <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,borderRadius:2,background:"#fbbf24",display:"inline-block"}}/>Preferred off</span>}
+      </div>
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App() {
+  const [gridPaste, setGridPaste] = useState("");
+  const [grid, setGrid] = useState(null);
+  const [gridError, setGridError] = useState("");
+
+  const [workingMode, setWorkingMode] = useState("type");
+  const [workingRaw, setWorkingRaw] = useState("");
+  const [parsedTrips, setParsedTrips] = useState(null);
+  const [fixedTrips, setFixedTrips] = useState({});
+  const [currentScore, setCurrentScore] = useState(null);
+
+  const [otPaste, setOtPaste] = useState("");
+  const [openTime, setOpenTime] = useState(null);
+  const [otError, setOtError] = useState("");
+
+  const [targetDays, setTargetDays] = useState("");
+  const [fixedRaw, setFixedRaw] = useState("");
+  const [avoidBefore, setAvoidBefore] = useState("");
+
+  const [results, setResults] = useState(null);
+  const [running, setRunning] = useState(false);
+  const [selected, setSelected] = useState(null);
+
+  function handleParseGrid() {
+    const g = parseReserveGrid(gridPaste);
+    if (!Object.keys(g).length) { setGridError("No data found."); return; }
+    setGrid(g); setGridError(""); setCurrentScore(null);
+  }
+
+  function handleParseSchedule() {
+    const trips = parseRefrigeratorList(workingRaw);
+    if (!trips.length) { return; }
+    setParsedTrips(trips); setFixedTrips({}); setCurrentScore(null);
+  }
+
+  function handleCalcScore() {
+    if (!grid) return;
+    const days = workingRaw.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
+    setCurrentScore(days.reduce((s, d) => s + (grid[d] || 0), 0));
+  }
+
+  function handleParseOT() {
+    const trips = parseOpenTime(otPaste);
+    if (!trips.length) { setOtError("No trips found. Paste the full Flica open time page."); return; }
+    setOpenTime(trips); setOtError("");
+  }
+
+  function handleRun() {
+    setRunning(true); setResults(null); setSelected(null);
+    const fixedDays = fixedRaw.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
+    const minDays = parseInt(targetDays) || 0;
+    const preferOff = avoidBefore.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
+    setTimeout(() => {
+      setResults(optimize(grid, openTime, minDays, currentScore, fixedDays, preferOff));
+      setRunning(false);
+    }, 50);
+  }
+
+  const fixedDaysParsed = fixedRaw.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
+  const preferOffParsed = avoidBefore.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
+  const canRun = grid && openTime && currentScore !== null && !running;
+
+  const card = {background:"#fff",borderRadius:10,padding:20,marginBottom:16,boxShadow:"0 1px 4px rgba(0,0,0,0.08)"};
+  const lbl = {fontSize:12,fontWeight:700,color:"#374151",marginBottom:6,display:"block",textTransform:"uppercase",letterSpacing:"0.05em"};
+  const inp = {width:"100%",padding:"8px 10px",borderRadius:6,border:"1.5px solid #e5e7eb",fontSize:13,boxSizing:"border-box"};
+  const btn = (off) => ({padding:"10px 20px",borderRadius:6,border:"none",cursor:off?"not-allowed":"pointer",fontWeight:700,fontSize:14,background:off?"#e5e7eb":"#1d4ed8",color:off?"#9ca3af":"#fff"});
+  const tab = (active) => ({padding:"6px 14px",borderRadius:6,border:"none",cursor:"pointer",fontWeight:700,fontSize:13,background:active?"#1d4ed8":"#e5e7eb",color:active?"#fff":"#374151"});
+
+  return (
+    <div style={{minHeight:"100vh",background:"#f1f5f9"}}>
+      <div style={{background:"#0f172a",padding:"18px 24px",display:"flex",alignItems:"center",gap:12,position:"sticky",top:0,zIndex:10}}>
+        <div style={{fontSize:22}}>✈️</div>
+        <div>
+          <div style={{color:"#f8fafc",fontWeight:800,fontSize:17}}>Endeavor Schedule Optimizer</div>
+          <div style={{color:"#64748b",fontSize:12}}>NYC-CR9-FO</div>
+        </div>
+      </div>
+
+      <div style={{padding:16,maxWidth:640,margin:"0 auto"}}>
+
+        {/* Step 1 - Reserve Grid */}
+        <div style={card}>
+          <div style={{fontWeight:800,fontSize:15,marginBottom:4,color:"#0f172a"}}>1 — Reserve Grid</div>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:12}}>Select All and Copy the reserve grid page, then paste below.</div>
+          <textarea style={{...inp,height:110,resize:"vertical"}} placeholder={"02JUL\t34\t2\t32\t47\t45\n03JUL\t34\t6\t28\t47\t45"} value={gridPaste} onChange={e=>setGridPaste(e.target.value)}/>
+          <button style={{...btn(!gridPaste),marginTop:8}} disabled={!gridPaste} onClick={handleParseGrid}>Parse Grid</button>
+          {gridError && <div style={{color:"#dc2626",fontSize:13,marginTop:8}}>{gridError}</div>}
+          {grid && (
+            <div style={{marginTop:10,background:"#f8fafc",borderRadius:6,padding:10}}>
+              <div style={{fontSize:12,fontWeight:700,color:"#374151",marginBottom:6}}>✓ {Object.keys(grid).length} days loaded</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                {Object.entries(grid).sort((a,b)=>parseInt(a[0])-parseInt(b[0])).map(([d,v]) => (
+                  <span key={d} style={{fontSize:11,background:"#fff",border:"1px solid #e5e7eb",borderRadius:4,padding:"2px 6px",fontFamily:"monospace"}}>{d}:<b style={{color:"#dc2626"}}>{v}</b></span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Step 2 - Working Days */}
+        <div style={card}>
+          <div style={{fontWeight:800,fontSize:15,marginBottom:8,color:"#0f172a"}}>2 — Current Working Days</div>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>Enter moveable working days, space separated. Don't include fixed trips.</div>
+          <textarea style={{...inp,height:80,resize:"vertical"}} placeholder="3 4 5 6   9 10 11 12   15 16 17 18   23 24 25 26" value={workingRaw} onChange={e=>{setWorkingRaw(e.target.value);setCurrentScore(null);}}/>
+          <button style={{...btn(!grid||!workingRaw),marginTop:8}} disabled={!grid||!workingRaw} onClick={handleCalcScore}>Calculate Score</button>
+          {currentScore !== null && (
+            <div style={{marginTop:10,display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:13,color:"#374151"}}>Current value:</span>
+              <span style={{fontWeight:800,fontSize:22,color:"#dc2626"}}>{currentScore}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Step 3 - Open Time */}
+        <div style={card}>
+          <div style={{fontWeight:800,fontSize:15,marginBottom:4,color:"#0f172a"}}>3 — Open Time</div>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:12}}>Select All and Copy the Flica open time page, then paste below. TB trips are filtered automatically.</div>
+          <textarea style={{...inp,height:120,resize:"vertical",fontSize:11}} placeholder="Paste full Flica open time page text here…" value={otPaste} onChange={e=>{setOtPaste(e.target.value);setOpenTime(null);setOtError("");}}/>
+          <button style={{...btn(!otPaste),marginTop:8}} disabled={!otPaste} onClick={handleParseOT}>Parse Open Time</button>
+          {otError && <div style={{color:"#dc2626",fontSize:13,marginTop:8}}>{otError}</div>}
+          {openTime && (
+            <div style={{marginTop:10,background:"#f8fafc",borderRadius:6,padding:10}}>
+              <div style={{fontSize:12,fontWeight:700,color:"#374151",marginBottom:6}}>✓ {openTime.length} available trips</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                {openTime.map((t,i) => (
+                  <span key={i} style={{fontSize:11,background:"#fff",border:"1px solid #e5e7eb",borderRadius:4,padding:"2px 6px",fontFamily:"monospace"}}>{t.start}·{t.length}d</span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Step 4 - Parameters */}
+        <div style={card}>
+          <div style={{fontWeight:800,fontSize:15,marginBottom:12,color:"#0f172a"}}>4 — Parameters</div>
+          <label style={lbl}>Minimum days to pick up</label>
+          <input style={inp} type="number" placeholder="e.g. 16" value={targetDays} onChange={e=>setTargetDays(e.target.value)}/>
+          <label style={{...lbl,marginTop:12}}>Fixed days (space separated)</label>
+          <input style={inp} placeholder="e.g. 30 31" value={fixedRaw} onChange={e=>setFixedRaw(e.target.value)}/>
+          <label style={{...lbl,marginTop:12}}>Prefer days off (optional)</label>
+          <input style={inp} placeholder="e.g. 2 3 4 5 6 7 8 9" value={avoidBefore} onChange={e=>setAvoidBefore(e.target.value)}/>
+          <button style={{...btn(!canRun),marginTop:16,width:"100%"}} disabled={!canRun} onClick={handleRun}>
+            {running?"Running…":"Find Optimal Schedules"}
+          </button>
+        </div>
+
+        {/* Results */}
+        {results !== null && (
+          <div style={card}>
+            <div style={{fontWeight:800,fontSize:15,marginBottom:4,color:"#0f172a"}}>Results</div>
+            {results.length===0
+              ? <div style={{color:"#6b7280",fontSize:13}}>No valid schedules found. Try relaxing preferences or check open time.</div>
+              : (
+                <div>
+                  <div style={{fontSize:12,color:"#6b7280",marginBottom:12}}>{results.length} valid schedule{results.length!==1?"s":""} found, lowest value first.</div>
+                  {results.map((r,i) => (
+                    <div key={i} onClick={()=>setSelected(selected===i?null:i)}
+                      style={{border:selected===i?"2px solid #2563eb":"1.5px solid #e5e7eb",borderRadius:8,padding:12,marginBottom:8,cursor:"pointer",background:selected===i?"#eff6ff":"#fff"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap"}}>
+                        <span style={{fontWeight:800,fontSize:14,color:"#0f172a"}}>#{i+1}</span>
+                        <span style={{fontWeight:800,fontSize:16,color:"#dc2626"}}>{r.score}</span>
+                        <span style={{fontSize:12,color:"#6b7280"}}>vs {currentScore}</span>
+                        <span style={{fontSize:12,fontWeight:700,color:r.score<currentScore?"#16a34a":"#ca8a04"}}>{r.score<currentScore?"▼ "+(currentScore-r.score):"= tie"}</span>
+                        {r.prefSatisfied && <span style={{background:"#16a34a",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>✓ all days off</span>}
+                        {r.prefPartial && <span style={{background:"#ca8a04",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>works day {r.prefConflicts.join(", ")}</span>}
+                      </div>
+                      <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                        {r.trips.map((t,ti) => (
+                          <span key={ti} style={{fontSize:12,background:"#f1f5f9",borderRadius:4,padding:"3px 8px",fontFamily:"monospace"}}>{t.start}–{t.start+t.length-1} JUL ({t.length}d)</span>
+                        ))}
+                      </div>
+                      {selected===i && <Calendar trips={r.trips} fixedDays={fixedDaysParsed} preferOff={preferOffParsed}/>}
+                    </div>
+                  ))}
+                </div>
+              )
+            }
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
