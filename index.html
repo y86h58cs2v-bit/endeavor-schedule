@@ -36,6 +36,24 @@ function maxConsecutive(trips, fixedDays) {
 }
 function parseDay(raw) { const m = String(raw).match(/(\d{1,2})/); return m ? parseInt(m[1]) : null; }
 
+function expandDayList(raw) {
+  const tokens = raw.split(/[\s,]+/).filter(Boolean);
+  const days = [];
+  for (const tok of tokens) {
+    const rangeMatch = tok.match(/^(\d{1,2})-(\d{1,2})$/);
+    if (rangeMatch) {
+      const start = parseInt(rangeMatch[1]), end = parseInt(rangeMatch[2]);
+      if (!isNaN(start) && !isNaN(end) && start <= end) {
+        for (let d = start; d <= end; d++) days.push(d);
+        continue;
+      }
+    }
+    const single = parseDay(tok);
+    if (single) days.push(single);
+  }
+  return days;
+}
+
 // ── parsers ───────────────────────────────────────────────────────────────────
 function parseReserveGrid(text) {
   const g = {};
@@ -242,7 +260,7 @@ function App() {
 
   function handleCalcScore() {
     if (!grid) return;
-    const days = workingRaw.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
+    const days = expandDayList(workingRaw);
     setCurrentScore(days.reduce((s, d) => s + getNet(grid, d), 0));
   }
 
@@ -254,18 +272,18 @@ function App() {
 
   function handleRun() {
     setRunning(true); setResults(null); setSelected(null);
-    const fixedDays = fixedRaw.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
+    const fixedDays = expandDayList(fixedRaw);
     const minDays = parseInt(targetDays) || 0;
-    const preferOff = avoidBefore.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
-    const droppingDays = workingRaw.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
+    const preferOff = expandDayList(avoidBefore);
+    const droppingDays = expandDayList(workingRaw);
     setTimeout(() => {
       setResults(optimize(grid, openTime, minDays, currentScore, droppingDays, fixedDays, preferOff));
       setRunning(false);
     }, 50);
   }
 
-  const fixedDaysParsed = fixedRaw.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
-  const preferOffParsed = avoidBefore.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
+  const fixedDaysParsed = expandDayList(fixedRaw);
+  const preferOffParsed = expandDayList(avoidBefore);
   const canRun = grid && openTime && currentScore !== null && !running;
 
   const card = {background:"#fff",borderRadius:10,padding:20,marginBottom:16,boxShadow:"0 1px 4px rgba(0,0,0,0.08)"};
@@ -309,7 +327,7 @@ function App() {
         <div style={card}>
           <div style={{fontWeight:800,fontSize:15,marginBottom:8,color:"#0f172a"}}>2 — Current Working Days</div>
           <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>Enter moveable working days, space separated. Don't include fixed trips.</div>
-          <textarea style={{...inp,height:80,resize:"vertical"}} placeholder="3 4 5 6   9 10 11 12   15 16 17 18   23 24 25 26" value={workingRaw} onChange={e=>{setWorkingRaw(e.target.value);setCurrentScore(null);}}/>
+          <textarea style={{...inp,height:80,resize:"vertical"}} placeholder="3-6   9-12   15-18   23-26" value={workingRaw} onChange={e=>{setWorkingRaw(e.target.value);setCurrentScore(null);}}/>
           <button style={{...btn(!grid||!workingRaw),marginTop:8}} disabled={!grid||!workingRaw} onClick={handleCalcScore}>Calculate Score</button>
           {currentScore !== null && (
             <div style={{marginTop:10,display:"flex",alignItems:"center",gap:8}}>
@@ -344,9 +362,9 @@ function App() {
           <label style={lbl}>Minimum days to pick up</label>
           <input style={inp} type="number" placeholder="e.g. 16" value={targetDays} onChange={e=>setTargetDays(e.target.value)}/>
           <label style={{...lbl,marginTop:12}}>Fixed days (space separated)</label>
-          <input style={inp} placeholder="e.g. 30 31" value={fixedRaw} onChange={e=>setFixedRaw(e.target.value)}/>
+          <input style={inp} placeholder="e.g. 30-31" value={fixedRaw} onChange={e=>setFixedRaw(e.target.value)}/>
           <label style={{...lbl,marginTop:12}}>Prefer days off (optional)</label>
-          <input style={inp} placeholder="e.g. 2 3 4 5 6 7 8 9" value={avoidBefore} onChange={e=>setAvoidBefore(e.target.value)}/>
+          <input style={inp} placeholder="e.g. 2-9" value={avoidBefore} onChange={e=>setAvoidBefore(e.target.value)}/>
           <button style={{...btn(!canRun),marginTop:16,width:"100%"}} disabled={!canRun} onClick={handleRun}>
             {running?"Running…":"Find Optimal Schedules"}
           </button>
