@@ -23,8 +23,10 @@ button { font-family: -apple-system, system-ui, sans-serif; }
 const { useState } = React;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+function getNet(grid, d) { return grid[d] ? grid[d].net : 0; }
+function getBuffer(grid, d) { return grid[d] ? grid[d].net - grid[d].minReq : 0; }
 function tripDays(start, length) { return Array.from({ length }, (_, i) => start + i); }
-function scoreTrip(start, length, grid) { return tripDays(start, length).reduce((s, d) => s + (grid[d] || 0), 0); }
+function scoreTrip(start, length, grid) { return tripDays(start, length).reduce((s, d) => s + getNet(grid, d), 0); }
 function hasOverlap(trips) { const all = trips.flatMap(t => tripDays(t.start, t.length)); return new Set(all).size !== all.length; }
 function maxConsecutive(trips, fixedDays) {
   const w = new Set([...trips.flatMap(t => tripDays(t.start, t.length)), ...fixedDays]);
@@ -38,12 +40,14 @@ function parseDay(raw) { const m = String(raw).match(/(\d{1,2})/); return m ? pa
 function parseReserveGrid(text) {
   const g = {};
   for (const line of text.split("\n")) {
-    const parts = line.trim().split(/\t/);
-    if (parts.length < 4) continue;
+    const parts = line.trim().split(/\t+|\s{2,}/);
+    if (parts.length < 5) continue;
     const dm = parts[0].match(/(\d{1,2})JUL/i);
     if (!dm) continue;
-    const day = parseInt(dm[1]), net = parseInt(parts[3]);
-    if (!isNaN(day) && !isNaN(net)) g[day] = net;
+    const day = parseInt(dm[1]);
+    const net = parseInt(parts[3]);
+    const minReq = parseInt(parts[4]);
+    if (!isNaN(day) && !isNaN(net)) g[day] = { net, minReq: isNaN(minReq) ? 47 : minReq };
   }
   return g;
 }
@@ -86,9 +90,16 @@ function parseOpenTime(text) {
     const dm = line.match(/(\d{1,2})JUL/i);
     if (!dm) continue;
     const start = parseInt(dm[1]);
-    const parts = line.split("\t");
+    // Try tabs first, fall back to splitting on the date itself
+    let parts = line.split("\t").map(p => p.trim()).filter(p => p.length);
+    if (parts.length < 3) {
+      // Fallback: find the date, then the next number after it is "days"
+      const afterDate = line.slice(line.indexOf(dm[0]) + dm[0].length);
+      const numMatch = afterDate.match(/\s*(\d{1,2})\s/);
+      if (numMatch) parts = ["", "", numMatch[1]];
+    }
     if (parts.length < 3) continue;
-    const length = parseInt(parts[2].trim());
+    const length = parseInt(parts[2]);
     if (isNaN(length) || length < 1 || length > 6) continue;
     const key = `${start}x${length}`;
     if (seen.has(key)) continue;
@@ -99,13 +110,36 @@ function parseOpenTime(text) {
 }
 
 // ── optimizer ─────────────────────────────────────────────────────────────────
-function optimize(grid, openTime, minDays, currentScore, fixedDays, preferOff) {
+function optimize(grid, openTime, minDays, currentScore, droppingDays, fixedDays, preferOff) {
   const safe = openTime.filter(c => !tripDays(c.start, c.length).some(d => fixedDays.includes(d)));
   const results = [];
+
   function search(index, chosen, daysUsed, scoreUsed) {
     if (daysUsed >= minDays) {
-      if (scoreUsed <= currentScore && !hasOverlap(chosen) && maxConsecutive(chosen, fixedDays) <= 6)
-        results.push({ trips: [...chosen], score: scoreUsed });
+      if (scoreUsed <= currentScore && !hasOverlap(chosen) && maxConsecutive(chosen, fixedDays) <= 6) {
+        const pickingUpDays = chosen.flatMap(t => tripDays(t.start, t.length));
+
+        // Only consider days that ACTUALLY CHANGE (pure drops or pure adds)
+        const onlyDrop = droppingDays.filter(d => !pickingUpDays.includes(d));
+        const onlyAdd = pickingUpDays.filter(d => !droppingDays.includes(d));
+        const changedDays = [...onlyDrop, ...onlyAdd];
+
+        let worstBefore = 0, worstAfter = 0;
+        if (changedDays.length > 0) {
+          worstBefore = Infinity; worstAfter = Infinity;
+          for (const d of changedDays) {
+            const buf = getBuffer(grid, d);
+            worstBefore = Math.min(worstBefore, buf);
+            const isDrop = onlyDrop.includes(d);
+            const bufAfter = isDrop ? buf - 1 : buf + 1;
+            worstAfter = Math.min(worstAfter, bufAfter);
+          }
+        }
+
+        if (worstAfter >= worstBefore) {
+          results.push({ trips: [...chosen], score: scoreUsed, worstBefore, worstAfter, onlyDrop, onlyAdd });
+        }
+      }
       return;
     }
     if (index >= safe.length || results.length > 500) return;
@@ -209,7 +243,7 @@ function App() {
   function handleCalcScore() {
     if (!grid) return;
     const days = workingRaw.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
-    setCurrentScore(days.reduce((s, d) => s + (grid[d] || 0), 0));
+    setCurrentScore(days.reduce((s, d) => s + getNet(grid, d), 0));
   }
 
   function handleParseOT() {
@@ -223,8 +257,9 @@ function App() {
     const fixedDays = fixedRaw.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
     const minDays = parseInt(targetDays) || 0;
     const preferOff = avoidBefore.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
+    const droppingDays = workingRaw.split(/[\s,\n]+/).map(parseDay).filter(Boolean);
     setTimeout(() => {
-      setResults(optimize(grid, openTime, minDays, currentScore, fixedDays, preferOff));
+      setResults(optimize(grid, openTime, minDays, currentScore, droppingDays, fixedDays, preferOff));
       setRunning(false);
     }, 50);
   }
@@ -263,7 +298,7 @@ function App() {
               <div style={{fontSize:12,fontWeight:700,color:"#374151",marginBottom:6}}>✓ {Object.keys(grid).length} days loaded</div>
               <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
                 {Object.entries(grid).sort((a,b)=>parseInt(a[0])-parseInt(b[0])).map(([d,v]) => (
-                  <span key={d} style={{fontSize:11,background:"#fff",border:"1px solid #e5e7eb",borderRadius:4,padding:"2px 6px",fontFamily:"monospace"}}>{d}:<b style={{color:"#dc2626"}}>{v}</b></span>
+                  <span key={d} style={{fontSize:11,background:"#fff",border:"1px solid #e5e7eb",borderRadius:4,padding:"2px 6px",fontFamily:"monospace"}}>{d}:<b style={{color:"#dc2626"}}>{v.net}</b>/<span style={{color:"#6b7280"}}>{v.minReq}</span></span>
                 ))}
               </div>
             </div>
@@ -336,6 +371,7 @@ function App() {
                         <span style={{fontSize:12,fontWeight:700,color:r.score<currentScore?"#16a34a":"#ca8a04"}}>{r.score<currentScore?"▼ "+(currentScore-r.score):"= tie"}</span>
                         {r.prefSatisfied && <span style={{background:"#16a34a",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>✓ all days off</span>}
                         {r.prefPartial && <span style={{background:"#ca8a04",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>works day {r.prefConflicts.join(", ")}</span>}
+                        {r.worstBefore !== undefined && <span style={{background:"#6b7280",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>worst: {r.worstBefore}→{r.worstAfter} | drop:{r.onlyDrop.join(",")} add:{r.onlyAdd.join(",")}</span>}
                       </div>
                       <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
                         {r.trips.map((t,ti) => (
