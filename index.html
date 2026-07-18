@@ -22,10 +22,10 @@ button { font-family: -apple-system, system-ui, sans-serif; }
 <script type="text/babel">
 const { useState } = React;
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ── helpers ───────────────────────────────────────────────────────────────────
+function tripDays(start, length) { return Array.from({ length }, (_, i) => start + i); }
 function getNet(grid, d) { return grid[d] ? grid[d].net : 0; }
 function getBuffer(grid, d) { return grid[d] ? grid[d].net - grid[d].minReq : 0; }
-function tripDays(start, length) { return Array.from({ length }, (_, i) => start + i); }
 function scoreTrip(start, length, grid) { return tripDays(start, length).reduce((s, d) => s + getNet(grid, d), 0); }
 function hasOverlap(trips) { const all = trips.flatMap(t => tripDays(t.start, t.length)); return new Set(all).size !== all.length; }
 function maxConsecutive(trips, fixedDays) {
@@ -34,33 +34,33 @@ function maxConsecutive(trips, fixedDays) {
   for (let d = 1; d <= 45; d++) { if (w.has(d)) { cur++; max = Math.max(max, cur); } else cur = 0; }
   return max;
 }
-function parseDay(raw) { const m = String(raw).match(/(\d{1,2})/); return m ? parseInt(m[1]) : null; }
 
+// ── day input parser (supports ranges like 3-6) ───────────────────────────────
 function expandDayList(raw) {
   const tokens = raw.split(/[\s,]+/).filter(Boolean);
   const days = [];
   for (const tok of tokens) {
     const rangeMatch = tok.match(/^(\d{1,2})-(\d{1,2})$/);
     if (rangeMatch) {
-      const start = parseInt(rangeMatch[1]), end = parseInt(rangeMatch[2]);
-      if (!isNaN(start) && !isNaN(end) && start <= end) {
-        for (let d = start; d <= end; d++) days.push(d);
-        continue;
-      }
+      const s = parseInt(rangeMatch[1]), e = parseInt(rangeMatch[2]);
+      if (!isNaN(s) && !isNaN(e) && s <= e) { for (let d = s; d <= e; d++) days.push(d); continue; }
     }
-    const single = parseDay(tok);
-    if (single) days.push(single);
+    const m = tok.match(/(\d{1,2})/);
+    if (m) days.push(parseInt(m[1]));
   }
   return days;
 }
 
 // ── parsers ───────────────────────────────────────────────────────────────────
+const MONTHS = "JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC";
+const DATE_RE = new RegExp("(\\d{1,2})(" + MONTHS + ")", "i");
+
 function parseReserveGrid(text) {
   const g = {};
   for (const line of text.split("\n")) {
     const parts = line.trim().split(/\t+|\s{2,}/);
     if (parts.length < 5) continue;
-    const dm = parts[0].match(/(\d{1,2})JUL/i);
+    const dm = parts[0].match(DATE_RE);
     if (!dm) continue;
     const day = parseInt(dm[1]);
     const net = parseInt(parts[3]);
@@ -70,48 +70,15 @@ function parseReserveGrid(text) {
   return g;
 }
 
-function parseRefrigeratorList(text) {
-  const lines = text.split("\n");
-  const trips = [];
-  let current = null;
-  for (const line of lines) {
-    if (/^Block|^Credit|^YTD|^Days Off/i.test(line.trim())) break;
-    const dm = line.match(/(\d{1,2})\s/);
-    if (!dm) continue;
-    const day = parseInt(dm[1]);
-    if (isNaN(day) || day > 31) continue;
-    const tm = line.match(/C\d{4,}/);
-    const hasAirport = line.match(/\s[A-Z]{3}\s*$/);
-    const isWorkingDay = tm || hasAirport;
-    if (tm) {
-      current = { code: tm[0], days: [day] };
-      trips.push(current);
-    } else if (current && isWorkingDay) {
-      const last = current.days[current.days.length - 1];
-      if (day === last + 1 || (last >= 28 && day <= 3)) {
-        current.days.push(day);
-      } else {
-        current = null;
-      }
-    } else {
-      // Blank day — end current trip
-      current = null;
-    }
-  }
-  return trips;
-}
-
 function parseOpenTime(text) {
   const seen = new Set(), results = [];
   for (const line of text.split("\n")) {
     if (line.includes("TradeBoard") || line.includes("Click to view") || line.startsWith("Pairing")) continue;
-    const dm = line.match(/(\d{1,2})JUL/i);
+    const dm = line.match(DATE_RE);
     if (!dm) continue;
     const start = parseInt(dm[1]);
-    // Try tabs first, fall back to splitting on the date itself
     let parts = line.split("\t").map(p => p.trim()).filter(p => p.length);
     if (parts.length < 3) {
-      // Fallback: find the date, then the next number after it is "days"
       const afterDate = line.slice(line.indexOf(dm[0]) + dm[0].length);
       const numMatch = afterDate.match(/\s*(\d{1,2})\s/);
       if (numMatch) parts = ["", "", numMatch[1]];
@@ -119,7 +86,7 @@ function parseOpenTime(text) {
     if (parts.length < 3) continue;
     const length = parseInt(parts[2]);
     if (isNaN(length) || length < 1 || length > 6) continue;
-    const key = `${start}x${length}`;
+    const key = start + "x" + length;
     if (seen.has(key)) continue;
     seen.add(key);
     results.push({ start, length });
@@ -128,39 +95,40 @@ function parseOpenTime(text) {
 }
 
 // ── optimizer ─────────────────────────────────────────────────────────────────
-function optimize(grid, openTime, minDays, currentScore, droppingDays, fixedDays, preferOff) {
+function optimize(grid, openTime, minDays, maxDays, droppingDays, fixedDays, preferOff) {
   const safe = openTime.filter(c => !tripDays(c.start, c.length).some(d => fixedDays.includes(d)));
   const results = [];
 
   function search(index, chosen, daysUsed, scoreUsed) {
     if (daysUsed >= minDays) {
-      if (scoreUsed <= currentScore && !hasOverlap(chosen) && maxConsecutive(chosen, fixedDays) <= 6) {
+      if (!hasOverlap(chosen) && maxConsecutive(chosen, fixedDays) <= 6) {
         const pickingUpDays = chosen.flatMap(t => tripDays(t.start, t.length));
-
-        // Only consider days that ACTUALLY CHANGE (pure drops or pure adds)
         const onlyDrop = droppingDays.filter(d => !pickingUpDays.includes(d));
         const onlyAdd = pickingUpDays.filter(d => !droppingDays.includes(d));
         const changedDays = [...onlyDrop, ...onlyAdd];
 
+        // Worst day rule
         let worstBefore = 0, worstAfter = 0;
         if (changedDays.length > 0) {
           worstBefore = Infinity; worstAfter = Infinity;
           for (const d of changedDays) {
             const buf = getBuffer(grid, d);
             worstBefore = Math.min(worstBefore, buf);
-            const isDrop = onlyDrop.includes(d);
-            const bufAfter = isDrop ? buf - 1 : buf + 1;
-            worstAfter = Math.min(worstAfter, bufAfter);
+            worstAfter = Math.min(worstAfter, onlyDrop.includes(d) ? buf - 1 : buf + 1);
           }
         }
 
-        if (worstAfter >= worstBefore) {
-          results.push({ trips: [...chosen], score: scoreUsed, worstBefore, worstAfter, onlyDrop, onlyAdd });
+        // Sum rule: add buffer sum must be <= drop buffer sum
+        const dropSum = onlyDrop.reduce((s, d) => s + getBuffer(grid, d), 0);
+        const addSum = onlyAdd.reduce((s, d) => s + getBuffer(grid, d), 0);
+
+        if (worstAfter >= worstBefore && addSum <= dropSum) {
+          results.push({ trips: [...chosen], worstBefore, worstAfter, onlyDrop, onlyAdd, dropSum, addSum });
         }
       }
       return;
     }
-    if (index >= safe.length || results.length > 500) return;
+    if (daysUsed > maxDays || index >= safe.length || results.length > 500) return;
     for (let i = index; i < safe.length; i++) {
       const c = safe[i];
       chosen.push(c);
@@ -169,12 +137,18 @@ function optimize(grid, openTime, minDays, currentScore, droppingDays, fixedDays
     }
   }
   search(0, [], 0, 0);
+
   const seen = new Set();
   const unique = results.filter(r => {
-    const key = r.trips.map(t => `${t.start}x${t.length}`).sort().join("|");
+    const key = r.trips.map(t => t.start + "x" + t.length).sort().join("|");
     if (seen.has(key)) return false;
     seen.add(key); return true;
-  }).sort((a, b) => a.score - b.score);
+  });
+
+  // Sort by best company benefit (most negative addSum - dropSum = best)
+  unique.sort((a, b) => (a.addSum - a.dropSum) - (b.addSum - b.dropSum));
+
+  // Apply preference flags
   unique.forEach(r => {
     const wd = r.trips.flatMap(t => tripDays(t.start, t.length));
     const conflicts = preferOff.filter(d => wd.includes(d));
@@ -182,6 +156,7 @@ function optimize(grid, openTime, minDays, currentScore, droppingDays, fixedDays
     r.prefPartial = preferOff.length > 0 ? (conflicts.length > 0 && conflicts.length < preferOff.length) : null;
     r.prefConflicts = conflicts;
   });
+
   return unique.slice(0, 50);
 }
 
@@ -189,11 +164,11 @@ function optimize(grid, openTime, minDays, currentScore, droppingDays, fixedDays
 const DOW = ["SU","MO","TU","WE","TH","FR","SA"];
 const COLORS = ["#2563eb","#16a34a","#9333ea","#ea580c","#0891b2","#be185d","#ca8a04"];
 
-function Calendar({ trips, fixedDays, preferOff }) {
+function Calendar({ trips, fixedDays, preferOff, monthStart }) {
   const wMap = {};
   trips.forEach((t, ti) => tripDays(t.start, t.length).forEach(d => { wMap[d] = ti; }));
   fixedDays.forEach(d => { wMap[d] = "fixed"; });
-  const cells = [...Array(3).fill(null), ...Array.from({length:31},(_,i)=>i+1)];
+  const cells = [...Array(monthStart).fill(null), ...Array.from({length:31},(_,i)=>i+1)];
   return (
     <div style={{marginTop:10}}>
       <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3,marginBottom:6}}>
@@ -212,11 +187,11 @@ function Calendar({ trips, fixedDays, preferOff }) {
         {trips.map((t,ti) => (
           <span key={ti} style={{display:"flex",alignItems:"center",gap:4}}>
             <span style={{width:10,height:10,borderRadius:2,background:COLORS[ti%COLORS.length],display:"inline-block"}}/>
-            {t.start}–{t.start+t.length-1} JUL ({t.length}d)
+            {t.start}-{t.start+t.length-1} ({t.length}d)
           </span>
         ))}
-        {fixedDays.length > 0 && <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,borderRadius:2,background:"#374151",display:"inline-block"}}/>Fixed</span>}
-        {preferOff && preferOff.length > 0 && <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,borderRadius:2,background:"#fbbf24",display:"inline-block"}}/>Preferred off</span>}
+        {fixedDays.length>0&&<span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,borderRadius:2,background:"#374151",display:"inline-block"}}/>Fixed</span>}
+        {preferOff&&preferOff.length>0&&<span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,borderRadius:2,background:"#fbbf24",display:"inline-block"}}/>Preferred off</span>}
       </div>
     </div>
   );
@@ -228,19 +203,18 @@ function App() {
   const [grid, setGrid] = useState(null);
   const [gridError, setGridError] = useState("");
 
-  const [workingMode, setWorkingMode] = useState("type");
   const [workingRaw, setWorkingRaw] = useState("");
-  const [parsedTrips, setParsedTrips] = useState(null);
-  const [fixedTrips, setFixedTrips] = useState({});
   const [currentScore, setCurrentScore] = useState(null);
 
   const [otPaste, setOtPaste] = useState("");
   const [openTime, setOpenTime] = useState(null);
   const [otError, setOtError] = useState("");
 
-  const [targetDays, setTargetDays] = useState("");
+  const [minDays, setMinDays] = useState("");
+  const [maxDays, setMaxDays] = useState("");
   const [fixedRaw, setFixedRaw] = useState("");
   const [avoidBefore, setAvoidBefore] = useState("");
+  const [monthStart, setMonthStart] = useState("3"); // July 2026 = Wednesday = 3
 
   const [results, setResults] = useState(null);
   const [running, setRunning] = useState(false);
@@ -248,14 +222,8 @@ function App() {
 
   function handleParseGrid() {
     const g = parseReserveGrid(gridPaste);
-    if (!Object.keys(g).length) { setGridError("No data found."); return; }
+    if (!Object.keys(g).length) { setGridError("No data found. Make sure you copied the full reserve grid page."); return; }
     setGrid(g); setGridError(""); setCurrentScore(null);
-  }
-
-  function handleParseSchedule() {
-    const trips = parseRefrigeratorList(workingRaw);
-    if (!trips.length) { return; }
-    setParsedTrips(trips); setFixedTrips({}); setCurrentScore(null);
   }
 
   function handleCalcScore() {
@@ -273,24 +241,24 @@ function App() {
   function handleRun() {
     setRunning(true); setResults(null); setSelected(null);
     const fixedDays = expandDayList(fixedRaw);
-    const minDays = parseInt(targetDays) || 0;
+    const min = parseInt(minDays) || 0;
+    const max = parseInt(maxDays) || 99;
     const preferOff = expandDayList(avoidBefore);
     const droppingDays = expandDayList(workingRaw);
     setTimeout(() => {
-      setResults(optimize(grid, openTime, minDays, currentScore, droppingDays, fixedDays, preferOff));
+      setResults(optimize(grid, openTime, min, max, droppingDays, fixedDays, preferOff));
       setRunning(false);
     }, 50);
   }
 
   const fixedDaysParsed = expandDayList(fixedRaw);
   const preferOffParsed = expandDayList(avoidBefore);
-  const canRun = grid && openTime && currentScore !== null && !running;
+  const canRun = grid && openTime && currentScore !== null && minDays && !running;
 
   const card = {background:"#fff",borderRadius:10,padding:20,marginBottom:16,boxShadow:"0 1px 4px rgba(0,0,0,0.08)"};
   const lbl = {fontSize:12,fontWeight:700,color:"#374151",marginBottom:6,display:"block",textTransform:"uppercase",letterSpacing:"0.05em"};
   const inp = {width:"100%",padding:"8px 10px",borderRadius:6,border:"1.5px solid #e5e7eb",fontSize:13,boxSizing:"border-box"};
   const btn = (off) => ({padding:"10px 20px",borderRadius:6,border:"none",cursor:off?"not-allowed":"pointer",fontWeight:700,fontSize:14,background:off?"#e5e7eb":"#1d4ed8",color:off?"#9ca3af":"#fff"});
-  const tab = (active) => ({padding:"6px 14px",borderRadius:6,border:"none",cursor:"pointer",fontWeight:700,fontSize:13,background:active?"#1d4ed8":"#e5e7eb",color:active?"#fff":"#374151"});
 
   return (
     <div style={{minHeight:"100vh",background:"#f1f5f9"}}>
@@ -304,11 +272,10 @@ function App() {
 
       <div style={{padding:16,maxWidth:640,margin:"0 auto"}}>
 
-        {/* Step 1 - Reserve Grid */}
         <div style={card}>
           <div style={{fontWeight:800,fontSize:15,marginBottom:4,color:"#0f172a"}}>1 — Reserve Grid</div>
           <div style={{fontSize:12,color:"#6b7280",marginBottom:12}}>Select All and Copy the reserve grid page, then paste below.</div>
-          <textarea style={{...inp,height:110,resize:"vertical"}} placeholder={"02JUL\t34\t2\t32\t47\t45\n03JUL\t34\t6\t28\t47\t45"} value={gridPaste} onChange={e=>setGridPaste(e.target.value)}/>
+          <textarea style={{...inp,height:110,resize:"vertical"}} placeholder={"01AUG\t23\t1\t22\t46\t44\n02AUG\t24\t6\t18\t46\t44"} value={gridPaste} onChange={e=>setGridPaste(e.target.value)}/>
           <button style={{...btn(!gridPaste),marginTop:8}} disabled={!gridPaste} onClick={handleParseGrid}>Parse Grid</button>
           {gridError && <div style={{color:"#dc2626",fontSize:13,marginTop:8}}>{gridError}</div>}
           {grid && (
@@ -316,17 +283,16 @@ function App() {
               <div style={{fontSize:12,fontWeight:700,color:"#374151",marginBottom:6}}>✓ {Object.keys(grid).length} days loaded</div>
               <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
                 {Object.entries(grid).sort((a,b)=>parseInt(a[0])-parseInt(b[0])).map(([d,v]) => (
-                  <span key={d} style={{fontSize:11,background:"#fff",border:"1px solid #e5e7eb",borderRadius:4,padding:"2px 6px",fontFamily:"monospace"}}>{d}:<b style={{color:"#dc2626"}}>{v.net}</b>/<span style={{color:"#6b7280"}}>{v.minReq}</span></span>
+                  <span key={d} style={{fontSize:11,background:"#fff",border:"1px solid #e5e7eb",borderRadius:4,padding:"2px 6px",fontFamily:"monospace"}}>{d}:<b style={{color:"#dc2626"}}>{v.net}</b></span>
                 ))}
               </div>
             </div>
           )}
         </div>
 
-        {/* Step 2 - Working Days */}
         <div style={card}>
           <div style={{fontWeight:800,fontSize:15,marginBottom:8,color:"#0f172a"}}>2 — Current Working Days</div>
-          <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>Enter moveable working days, space separated. Don't include fixed trips.</div>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>Enter moveable working days. Supports ranges like 3-6. Don't include fixed trips.</div>
           <textarea style={{...inp,height:80,resize:"vertical"}} placeholder="3-6   9-12   15-18   23-26" value={workingRaw} onChange={e=>{setWorkingRaw(e.target.value);setCurrentScore(null);}}/>
           <button style={{...btn(!grid||!workingRaw),marginTop:8}} disabled={!grid||!workingRaw} onClick={handleCalcScore}>Calculate Score</button>
           {currentScore !== null && (
@@ -337,7 +303,6 @@ function App() {
           )}
         </div>
 
-        {/* Step 3 - Open Time */}
         <div style={card}>
           <div style={{fontWeight:800,fontSize:15,marginBottom:4,color:"#0f172a"}}>3 — Open Time</div>
           <div style={{fontSize:12,color:"#6b7280",marginBottom:12}}>Select All and Copy the Flica open time page, then paste below. TB trips are filtered automatically.</div>
@@ -356,12 +321,15 @@ function App() {
           )}
         </div>
 
-        {/* Step 4 - Parameters */}
         <div style={card}>
           <div style={{fontWeight:800,fontSize:15,marginBottom:12,color:"#0f172a"}}>4 — Parameters</div>
-          <label style={lbl}>Minimum days to pick up</label>
-          <input style={inp} type="number" placeholder="e.g. 16" value={targetDays} onChange={e=>setTargetDays(e.target.value)}/>
-          <label style={{...lbl,marginTop:12}}>Fixed days (space separated)</label>
+          <label style={lbl}>Days to pick up (range)</label>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <input style={{...inp,width:"45%"}} type="number" placeholder="min e.g. 4" value={minDays} onChange={e=>setMinDays(e.target.value)}/>
+            <span style={{color:"#6b7280",fontSize:13}}>to</span>
+            <input style={{...inp,width:"45%"}} type="number" placeholder="max e.g. 6" value={maxDays} onChange={e=>setMaxDays(e.target.value)}/>
+          </div>
+          <label style={{...lbl,marginTop:12}}>Fixed days (can't move)</label>
           <input style={inp} placeholder="e.g. 30-31" value={fixedRaw} onChange={e=>setFixedRaw(e.target.value)}/>
           <label style={{...lbl,marginTop:12}}>Prefer days off (optional)</label>
           <input style={inp} placeholder="e.g. 2-9" value={avoidBefore} onChange={e=>setAvoidBefore(e.target.value)}/>
@@ -370,7 +338,6 @@ function App() {
           </button>
         </div>
 
-        {/* Results */}
         {results !== null && (
           <div style={card}>
             <div style={{fontWeight:800,fontSize:15,marginBottom:4,color:"#0f172a"}}>Results</div>
@@ -378,25 +345,24 @@ function App() {
               ? <div style={{color:"#6b7280",fontSize:13}}>No valid schedules found. Try relaxing preferences or check open time.</div>
               : (
                 <div>
-                  <div style={{fontSize:12,color:"#6b7280",marginBottom:12}}>{results.length} valid schedule{results.length!==1?"s":""} found, lowest value first.</div>
+                  <div style={{fontSize:12,color:"#6b7280",marginBottom:12}}>{results.length} valid schedule{results.length!==1?"s":""} found, best company benefit first.</div>
                   {results.map((r,i) => (
                     <div key={i} onClick={()=>setSelected(selected===i?null:i)}
                       style={{border:selected===i?"2px solid #2563eb":"1.5px solid #e5e7eb",borderRadius:8,padding:12,marginBottom:8,cursor:"pointer",background:selected===i?"#eff6ff":"#fff"}}>
                       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap"}}>
                         <span style={{fontWeight:800,fontSize:14,color:"#0f172a"}}>#{i+1}</span>
-                        <span style={{fontWeight:800,fontSize:16,color:"#dc2626"}}>{r.score}</span>
-                        <span style={{fontSize:12,color:"#6b7280"}}>vs {currentScore}</span>
-                        <span style={{fontSize:12,fontWeight:700,color:r.score<currentScore?"#16a34a":"#ca8a04"}}>{r.score<currentScore?"▼ "+(currentScore-r.score):"= tie"}</span>
-                        {r.prefSatisfied && <span style={{background:"#16a34a",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>✓ all days off</span>}
-                        {r.prefPartial && <span style={{background:"#ca8a04",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>works day {r.prefConflicts.join(", ")}</span>}
-                        {r.worstBefore !== undefined && <span style={{background:"#6b7280",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>worst: {r.worstBefore}→{r.worstAfter} | drop:{r.onlyDrop.join(",")} add:{r.onlyAdd.join(",")}</span>}
+                        <span style={{fontSize:12,fontWeight:700,color:"#16a34a"}}>benefit: {r.dropSum - r.addSum}</span>
+                        <span style={{fontSize:11,color:"#6b7280"}}>drop:{r.onlyDrop.join(",")} add:{r.onlyAdd.join(",")}</span>
+                        <span style={{background:"#6b7280",color:"#fff",borderRadius:4,padding:"2px 6px",fontSize:11,fontWeight:700}}>worst:{r.worstBefore}→{r.worstAfter}</span>
+                        {r.prefSatisfied && <span style={{background:"#16a34a",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>✓ days off</span>}
+                        {r.prefPartial && <span style={{background:"#ca8a04",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>works {r.prefConflicts.join(",")}</span>}
                       </div>
                       <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
                         {r.trips.map((t,ti) => (
-                          <span key={ti} style={{fontSize:12,background:"#f1f5f9",borderRadius:4,padding:"3px 8px",fontFamily:"monospace"}}>{t.start}–{t.start+t.length-1} JUL ({t.length}d)</span>
+                          <span key={ti} style={{fontSize:12,background:"#f1f5f9",borderRadius:4,padding:"3px 8px",fontFamily:"monospace"}}>{t.start}-{t.start+t.length-1} ({t.length}d)</span>
                         ))}
                       </div>
-                      {selected===i && <Calendar trips={r.trips} fixedDays={fixedDaysParsed} preferOff={preferOffParsed}/>}
+                      {selected===i && <Calendar trips={r.trips} fixedDays={fixedDaysParsed} preferOff={preferOffParsed} monthStart={parseInt(monthStart)||0}/>}
                     </div>
                   ))}
                 </div>
