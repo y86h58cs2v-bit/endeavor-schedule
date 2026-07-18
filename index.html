@@ -141,9 +141,11 @@ function optimize(grid, openTime, minDays, maxDays, droppingDays, fixedDays, pre
     if (daysUsed > maxDays || index >= safe.length || results.length > 500) return;
     for (let i = index; i < safe.length; i++) {
       const c = safe[i];
-      chosen.push(c);
-      search(i + 1, chosen, daysUsed + c.length, scoreUsed + scoreTrip(c.start, c.length, grid));
-      chosen.pop();
+      if (daysUsed + c.length <= maxDays) {
+        chosen.push(c);
+        search(i + 1, chosen, daysUsed + c.length, scoreUsed + scoreTrip(c.start, c.length, grid));
+        chosen.pop();
+      }
     }
   }
   search(0, [], 0, 0);
