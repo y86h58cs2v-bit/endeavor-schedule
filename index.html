@@ -13,7 +13,7 @@
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #f1f5f9; font-family: -apple-system, system-ui, sans-serif; }
-textarea, input { font-family: monospace; outline: none; }
+textarea, input { font-family: monospace; outline: none; font-size: 16px; }
 button { font-family: -apple-system, system-ui, sans-serif; }
 </style>
 </head>
@@ -21,6 +21,14 @@ button { font-family: -apple-system, system-ui, sans-serif; }
 <div id="root"></div>
 <script type="text/babel">
 const { useState } = React;
+
+// ── constants ─────────────────────────────────────────────────────────────────
+// Days 1-31 = current month, days 32-62 = next month (day 32 = 1st of next month)
+const NEXT_MONTH_OFFSET = 31;
+const MONTHS = "JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC";
+const DATE_RE = new RegExp("(\\d{1,2})(" + MONTHS + ")", "i");
+const MONTH_MAP = {JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};
+const MONTH_NAMES = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 function tripDays(start, length) { return Array.from({ length }, (_, i) => start + i); }
@@ -31,48 +39,60 @@ function hasOverlap(trips) { const all = trips.flatMap(t => tripDays(t.start, t.
 function maxConsecutive(trips, fixedDays) {
   const w = new Set([...trips.flatMap(t => tripDays(t.start, t.length)), ...fixedDays]);
   let max = 0, cur = 0;
-  for (let d = 1; d <= 45; d++) { if (w.has(d)) { cur++; max = Math.max(max, cur); } else cur = 0; }
+  for (let d = 1; d <= 62; d++) { if (w.has(d)) { cur++; max = Math.max(max, cur); } else cur = 0; }
   return max;
 }
 
-// ── day input parser (supports ranges like 3-6) ───────────────────────────────
+function formatDay(d, month1Name, month2Name) {
+  if (d <= 31) return d + (month1Name ? " " + month1Name : "");
+  return (d - NEXT_MONTH_OFFSET) + (month2Name ? " " + month2Name : "");
+}
+
+// ── day input parser (supports ranges, month boundary) ────────────────────────
+// "30-2" means 30,31 of month1 then 1,2 of month2 (stored as 32,33)
 function expandDayList(raw) {
-  const tokens = raw.split(/[\s,]+/).filter(Boolean);
+  const tokens = raw.trim().split(/[\s,]+/).filter(Boolean);
   const days = [];
   for (const tok of tokens) {
-    const rangeMatch = tok.match(/^(\d{1,2})-(\d{1,2})$/);
+    const nextMonth = tok.startsWith("+");
+    const clean = nextMonth ? tok.slice(1) : tok;
+    const offset = nextMonth ? NEXT_MONTH_OFFSET : 0;
+
+    const rangeMatch = clean.match(/^(\d{1,2})-(\d{1,2})$/);
     if (rangeMatch) {
-      const s = parseInt(rangeMatch[1]), e = parseInt(rangeMatch[2]);
-      if (!isNaN(s) && !isNaN(e) && s <= e) { for (let d = s; d <= e; d++) days.push(d); continue; }
+      let s = parseInt(rangeMatch[1]), e = parseInt(rangeMatch[2]);
+      if (!isNaN(s) && !isNaN(e)) {
+        if (!nextMonth && e < s) e += NEXT_MONTH_OFFSET; // crosses month boundary
+        for (let d = s + offset; d <= e + offset; d++) days.push(d);
+        continue;
+      }
     }
-    const m = tok.match(/(\d{1,2})/);
-    if (m) days.push(parseInt(m[1]));
+    const m = clean.match(/^(\d{1,2})$/);
+    if (m) days.push(parseInt(m[1]) + offset);
   }
-  return days;
+  return [...new Set(days)].sort((a,b)=>a-b);
 }
 
-function getMonthStartDay(text) {
-  // Extract month and year from grid text to calculate what day of week the 1st falls on
-  const MONTH_MAP = {JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};
-  const m = text.match(/(\d{1,2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{4})?/i);
-  if (!m) return 0;
-  const month = MONTH_MAP[m[2].toUpperCase()];
-  // Try to find year in text, default to current year
+// ── parsers ───────────────────────────────────────────────────────────────────
+function getMonthInfo(text) {
+  const m = text.match(DATE_RE);
+  if (!m) return { monthIdx: -1, monthName: "", startDay: 0 };
+  const monthName = m[2].toUpperCase();
+  const monthIdx = MONTH_MAP[monthName] ?? -1;
   const yearMatch = text.match(/20\d{2}/);
   const year = yearMatch ? parseInt(yearMatch[0]) : new Date().getFullYear();
-  return new Date(year, month, 1).getDay();
+  const startDay = monthIdx >= 0 ? new Date(year, monthIdx, 1).getDay() : 0;
+  return { monthIdx, monthName, startDay };
 }
-const MONTHS = "JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC";
-const DATE_RE = new RegExp("(\\d{1,2})(" + MONTHS + ")", "i");
 
-function parseReserveGrid(text) {
+function parseReserveGrid(text, offset) {
   const g = {};
   for (const line of text.split("\n")) {
     const parts = line.trim().split(/\t+|\s{2,}/);
     if (parts.length < 5) continue;
     const dm = parts[0].match(DATE_RE);
     if (!dm) continue;
-    const day = parseInt(dm[1]);
+    const day = parseInt(dm[1]) + offset;
     const net = parseInt(parts[3]);
     const minReq = parseInt(parts[4]);
     if (!isNaN(day) && !isNaN(net)) g[day] = { net, minReq: isNaN(minReq) ? 47 : minReq };
@@ -80,13 +100,13 @@ function parseReserveGrid(text) {
   return g;
 }
 
-function parseOpenTime(text) {
+function parseOpenTime(text, offset) {
   const seen = new Set(), results = [];
   for (const line of text.split("\n")) {
     if (line.includes("TradeBoard") || line.includes("Click to view") || line.startsWith("Pairing")) continue;
     const dm = line.match(DATE_RE);
     if (!dm) continue;
-    const start = parseInt(dm[1]);
+    const start = parseInt(dm[1]) + offset;
     let parts = line.split("\t").map(p => p.trim()).filter(p => p.length);
     if (parts.length < 3) {
       const afterDate = line.slice(line.indexOf(dm[0]) + dm[0].length);
@@ -101,7 +121,7 @@ function parseOpenTime(text) {
     seen.add(key);
     results.push({ start, length });
   }
-  return results.sort((a, b) => a.start - b.start || a.length - b.length);
+  return results;
 }
 
 // ── optimizer ─────────────────────────────────────────────────────────────────
@@ -109,7 +129,7 @@ function optimize(grid, openTime, minDays, maxDays, droppingDays, fixedDays, pre
   const safe = openTime.filter(c => !tripDays(c.start, c.length).some(d => fixedDays.includes(d)));
   const results = [];
 
-  function search(index, chosen, daysUsed, scoreUsed) {
+  function search(index, chosen, daysUsed) {
     if (daysUsed >= minDays) {
       if (!hasOverlap(chosen) && maxConsecutive(chosen, fixedDays) <= 6) {
         const pickingUpDays = chosen.flatMap(t => tripDays(t.start, t.length));
@@ -117,7 +137,6 @@ function optimize(grid, openTime, minDays, maxDays, droppingDays, fixedDays, pre
         const onlyAdd = pickingUpDays.filter(d => !droppingDays.includes(d));
         const changedDays = [...onlyDrop, ...onlyAdd];
 
-        // Worst day rule
         let worstBefore = 0, worstAfter = 0;
         if (changedDays.length > 0) {
           worstBefore = Infinity; worstAfter = Infinity;
@@ -128,7 +147,6 @@ function optimize(grid, openTime, minDays, maxDays, droppingDays, fixedDays, pre
           }
         }
 
-        // Sum rule: add buffer sum must be <= drop buffer sum
         const dropSum = onlyDrop.reduce((s, d) => s + getBuffer(grid, d), 0);
         const addSum = onlyAdd.reduce((s, d) => s + getBuffer(grid, d), 0);
 
@@ -138,29 +156,33 @@ function optimize(grid, openTime, minDays, maxDays, droppingDays, fixedDays, pre
       }
       return;
     }
-    if (daysUsed > maxDays || index >= safe.length || results.length > 500) return;
+    if (index >= safe.length || results.length > 500) return;
     for (let i = index; i < safe.length; i++) {
       const c = safe[i];
       if (daysUsed + c.length <= maxDays) {
         chosen.push(c);
-        search(i + 1, chosen, daysUsed + c.length, scoreUsed + scoreTrip(c.start, c.length, grid));
+        search(i + 1, chosen, daysUsed + c.length);
         chosen.pop();
       }
     }
   }
-  search(0, [], 0, 0);
+  search(0, [], 0);
 
   const seen = new Set();
+  // Filter out results identical to current schedule
+  const droppingSet = droppingDays.slice().sort().join(",");
   const unique = results.filter(r => {
     const key = r.trips.map(t => t.start + "x" + t.length).sort().join("|");
     if (seen.has(key)) return false;
     seen.add(key); return true;
+  }).filter(r => {
+    // Remove if new schedule covers exact same days as current
+    const newDays = r.trips.flatMap(t => tripDays(t.start, t.length)).sort((a,b)=>a-b).join(",");
+    return newDays !== droppingSet;
   });
 
-  // Sort by best company benefit (most negative addSum - dropSum = best)
   unique.sort((a, b) => (a.addSum - a.dropSum) - (b.addSum - b.dropSum));
 
-  // Apply preference flags
   unique.forEach(r => {
     const wd = r.trips.flatMap(t => tripDays(t.start, t.length));
     const conflicts = preferOff.filter(d => wd.includes(d));
@@ -176,30 +198,50 @@ function optimize(grid, openTime, minDays, maxDays, droppingDays, fixedDays, pre
 const DOW = ["SU","MO","TU","WE","TH","FR","SA"];
 const COLORS = ["#2563eb","#16a34a","#9333ea","#ea580c","#0891b2","#be185d","#ca8a04"];
 
-function Calendar({ trips, fixedDays, preferOff, monthStart }) {
+function Calendar({ trips, fixedDays, preferOff, month1Start, month1Name, month2Name }) {
   const wMap = {};
   trips.forEach((t, ti) => tripDays(t.start, t.length).forEach(d => { wMap[d] = ti; }));
   fixedDays.forEach(d => { wMap[d] = "fixed"; });
-  const cells = [...Array(monthStart).fill(null), ...Array.from({length:31},(_,i)=>i+1)];
+
+  const dualMonth = month2Name && trips.some(t => t.start + t.length - 1 > 31);
+  const cells1 = [...Array(month1Start).fill(null), ...Array.from({length:31},(_,i)=>i+1)];
+
+  // Calculate next month start day
+  const month2Start = (month1Start + 31) % 7;
+  const cells2 = [...Array(month2Start).fill(null), ...Array.from({length:31},(_,i)=>i+32)];
+
+  function renderCell(d, i) {
+    if (!d) return <div key={"e"+i}/>;
+    const ti = wMap[d];
+    const isFixed = ti==="fixed", isWork = ti!==undefined;
+    const isPref = preferOff && preferOff.includes(d);
+    const bg = isFixed?"#374151":isWork?COLORS[ti%COLORS.length]:isPref?"#fef3c7":"#f9fafb";
+    const color = (isWork||isFixed)?"#fff":isPref?"#92400e":"#374151";
+    const label = d > 31 ? d - NEXT_MONTH_OFFSET : d;
+    return <div key={d} style={{background:bg,color,borderRadius:4,padding:"5px 2px",textAlign:"center",fontSize:11,fontWeight:isWork?700:400,border:(isPref&&!isWork)?"1px solid #fbbf24":"1px solid transparent"}}>{label}</div>;
+  }
+
   return (
     <div style={{marginTop:10}}>
+      {month1Name && <div style={{fontSize:11,fontWeight:700,color:"#374151",marginBottom:4}}>{month1Name}</div>}
       <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3,marginBottom:6}}>
         {DOW.map(d => <div key={d} style={{textAlign:"center",fontSize:10,color:"#6b7280",fontWeight:700}}>{d}</div>)}
-        {cells.map((d,i) => {
-          if (!d) return <div key={"e"+i}/>;
-          const ti = wMap[d];
-          const isFixed = ti==="fixed", isWork = ti!==undefined;
-          const isPref = preferOff && preferOff.includes(d);
-          const bg = isFixed?"#374151":isWork?COLORS[ti%COLORS.length]:isPref?"#fef3c7":"#f9fafb";
-          const color = (isWork||isFixed)?"#fff":isPref?"#92400e":"#374151";
-          return <div key={d} style={{background:bg,color,borderRadius:4,padding:"5px 2px",textAlign:"center",fontSize:11,fontWeight:isWork?700:400,border:(isPref&&!isWork)?"1px solid #fbbf24":"1px solid transparent"}}>{d}</div>;
-        })}
+        {cells1.map((d,i) => renderCell(d,i))}
       </div>
-      <div style={{display:"flex",flexWrap:"wrap",gap:6,fontSize:11}}>
+      {dualMonth && month2Name && (
+        <>
+          <div style={{fontSize:11,fontWeight:700,color:"#374151",margin:"8px 0 4px"}}>{month2Name}</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3,marginBottom:6}}>
+            {DOW.map(d => <div key={"n"+d} style={{textAlign:"center",fontSize:10,color:"#6b7280",fontWeight:700}}>{d}</div>)}
+            {cells2.map((d,i) => renderCell(d,i))}
+          </div>
+        </>
+      )}
+      <div style={{display:"flex",flexWrap:"wrap",gap:6,fontSize:11,marginTop:4}}>
         {trips.map((t,ti) => (
           <span key={ti} style={{display:"flex",alignItems:"center",gap:4}}>
             <span style={{width:10,height:10,borderRadius:2,background:COLORS[ti%COLORS.length],display:"inline-block"}}/>
-            {t.start}-{t.start+t.length-1} ({t.length}d)
+            {formatDay(t.start,month1Name,month2Name)}-{formatDay(t.start+t.length-1,month1Name,month2Name)} ({t.length}d)
           </span>
         ))}
         {fixedDays.length>0&&<span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,borderRadius:2,background:"#374151",display:"inline-block"}}/>Fixed</span>}
@@ -211,14 +253,19 @@ function Calendar({ trips, fixedDays, preferOff, monthStart }) {
 
 // ── App ───────────────────────────────────────────────────────────────────────
 function App() {
-  const [gridPaste, setGridPaste] = useState("");
+  const [grid1Paste, setGrid1Paste] = useState("");
+  const [grid2Paste, setGrid2Paste] = useState("");
   const [grid, setGrid] = useState(null);
   const [gridError, setGridError] = useState("");
+  const [month1Name, setMonth1Name] = useState("");
+  const [month2Name, setMonth2Name] = useState("");
+  const [month1Start, setMonth1Start] = useState(0);
 
   const [workingRaw, setWorkingRaw] = useState("");
   const [currentScore, setCurrentScore] = useState(null);
 
-  const [otPaste, setOtPaste] = useState("");
+  const [ot1Paste, setOt1Paste] = useState("");
+  const [ot2Paste, setOt2Paste] = useState("");
   const [openTime, setOpenTime] = useState(null);
   const [otError, setOtError] = useState("");
 
@@ -226,17 +273,26 @@ function App() {
   const [maxDays, setMaxDays] = useState("");
   const [fixedRaw, setFixedRaw] = useState("");
   const [avoidBefore, setAvoidBefore] = useState("");
+
   const [results, setResults] = useState(null);
   const [running, setRunning] = useState(false);
   const [selected, setSelected] = useState(null);
 
-  const [monthStart, setMonthStart] = useState(0);
-
   function handleParseGrid() {
-    const g = parseReserveGrid(gridPaste);
-    if (!Object.keys(g).length) { setGridError("No data found. Make sure you copied the full reserve grid page."); return; }
-    setGrid(g); setGridError(""); setCurrentScore(null);
-    setMonthStart(getMonthStartDay(gridPaste));
+    const info1 = getMonthInfo(grid1Paste);
+    const g1 = parseReserveGrid(grid1Paste, 0);
+    const g2 = grid2Paste ? parseReserveGrid(grid2Paste, NEXT_MONTH_OFFSET) : {};
+    const combined = { ...g1, ...g2 };
+    if (!Object.keys(combined).length) { setGridError("No data found."); return; }
+    setGrid(combined); setGridError(""); setCurrentScore(null);
+    setMonth1Name(info1.monthName);
+    setMonth1Start(info1.startDay);
+    if (grid2Paste) {
+      const info2 = getMonthInfo(grid2Paste);
+      setMonth2Name(info2.monthName);
+    } else {
+      setMonth2Name("");
+    }
   }
 
   function handleCalcScore() {
@@ -246,9 +302,17 @@ function App() {
   }
 
   function handleParseOT() {
-    const trips = parseOpenTime(otPaste);
-    if (!trips.length) { setOtError("No trips found. Paste the full Flica open time page."); return; }
-    setOpenTime(trips); setOtError("");
+    const trips1 = parseOpenTime(ot1Paste, 0);
+    const trips2 = ot2Paste ? parseOpenTime(ot2Paste, NEXT_MONTH_OFFSET) : [];
+    const all = [...trips1, ...trips2];
+    const seen = new Set();
+    const deduped = all.filter(t => {
+      const k = t.start + "x" + t.length;
+      if (seen.has(k)) return false;
+      seen.add(k); return true;
+    }).sort((a,b) => a.start - b.start || a.length - b.length);
+    if (!deduped.length) { setOtError("No trips found."); return; }
+    setOpenTime(deduped); setOtError("");
   }
 
   function handleRun() {
@@ -270,7 +334,7 @@ function App() {
 
   const card = {background:"#fff",borderRadius:10,padding:20,marginBottom:16,boxShadow:"0 1px 4px rgba(0,0,0,0.08)"};
   const lbl = {fontSize:12,fontWeight:700,color:"#374151",marginBottom:6,display:"block",textTransform:"uppercase",letterSpacing:"0.05em"};
-  const inp = {width:"100%",padding:"8px 10px",borderRadius:6,border:"1.5px solid #e5e7eb",fontSize:13,boxSizing:"border-box"};
+  const inp = {width:"100%",padding:"8px 10px",borderRadius:6,border:"1.5px solid #e5e7eb",fontSize:"16px",boxSizing:"border-box"};
   const btn = (off) => ({padding:"10px 20px",borderRadius:6,border:"none",cursor:off?"not-allowed":"pointer",fontWeight:700,fontSize:14,background:off?"#e5e7eb":"#1d4ed8",color:off?"#9ca3af":"#fff"});
 
   return (
@@ -285,28 +349,35 @@ function App() {
 
       <div style={{padding:16,maxWidth:640,margin:"0 auto"}}>
 
+        {/* Step 1 - Reserve Grid */}
         <div style={card}>
           <div style={{fontWeight:800,fontSize:15,marginBottom:4,color:"#0f172a"}}>1 — Reserve Grid</div>
-          <div style={{fontSize:12,color:"#6b7280",marginBottom:12}}>Select All and Copy the reserve grid page, then paste below.</div>
-          <textarea style={{...inp,height:110,resize:"vertical"}} placeholder={"01AUG\t23\t1\t22\t46\t44\n02AUG\t24\t6\t18\t46\t44"} value={gridPaste} onChange={e=>setGridPaste(e.target.value)}/>
-          <button style={{...btn(!gridPaste),marginTop:8}} disabled={!gridPaste} onClick={handleParseGrid}>Parse Grid</button>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>Paste current month grid. If you're past the 18th, also paste next month's grid below.</div>
+          <label style={lbl}>Current month</label>
+          <textarea style={{...inp,height:100,resize:"vertical"}} placeholder={"01AUG\t23\t1\t22\t46\t44\n02AUG\t24\t6\t18\t46\t44"} value={grid1Paste} onChange={e=>setGrid1Paste(e.target.value)}/>
+          <label style={{...lbl,marginTop:12}}>Next month (optional — paste after the 18th)</label>
+          <textarea style={{...inp,height:80,resize:"vertical"}} placeholder={"01SEP\t30\t2\t28\t47\t45\n02SEP\t31\t3\t28\t47\t45"} value={grid2Paste} onChange={e=>setGrid2Paste(e.target.value)}/>
+          <button style={{...btn(!grid1Paste),marginTop:8}} disabled={!grid1Paste} onClick={handleParseGrid}>Parse Grid</button>
           {gridError && <div style={{color:"#dc2626",fontSize:13,marginTop:8}}>{gridError}</div>}
           {grid && (
             <div style={{marginTop:10,background:"#f8fafc",borderRadius:6,padding:10}}>
-              <div style={{fontSize:12,fontWeight:700,color:"#374151",marginBottom:6}}>✓ {Object.keys(grid).length} days loaded</div>
+              <div style={{fontSize:12,fontWeight:700,color:"#374151",marginBottom:6}}>✓ {Object.keys(grid).length} days loaded {month1Name}{month2Name ? " + " + month2Name : ""}</div>
               <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
                 {Object.entries(grid).sort((a,b)=>parseInt(a[0])-parseInt(b[0])).map(([d,v]) => (
-                  <span key={d} style={{fontSize:11,background:"#fff",border:"1px solid #e5e7eb",borderRadius:4,padding:"2px 6px",fontFamily:"monospace"}}>{d}:<b style={{color:"#dc2626"}}>{v.net}</b></span>
+                  <span key={d} style={{fontSize:11,background:"#fff",border:"1px solid #e5e7eb",borderRadius:4,padding:"2px 6px",fontFamily:"monospace"}}>
+                    {formatDay(parseInt(d),month1Name,month2Name)}:<b style={{color:"#dc2626"}}>{v.net}</b>
+                  </span>
                 ))}
               </div>
             </div>
           )}
         </div>
 
+        {/* Step 2 - Working Days */}
         <div style={card}>
           <div style={{fontWeight:800,fontSize:15,marginBottom:8,color:"#0f172a"}}>2 — Current Working Days</div>
-          <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>Enter moveable working days. Supports ranges like 3-6. Don't include fixed trips.</div>
-          <textarea style={{...inp,height:80,resize:"vertical"}} placeholder="3-6   9-12   15-18   23-26" value={workingRaw} onChange={e=>{setWorkingRaw(e.target.value);setCurrentScore(null);}}/>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>Supports ranges like 3-6, boundary crossing like 30-2, and next month days with + like +24-27. Don't include fixed trips.</div>
+          <textarea style={{...inp,height:80,resize:"vertical"}} placeholder="6-9   13-16   21-24   27-30   +1-4" value={workingRaw} onChange={e=>{setWorkingRaw(e.target.value);setCurrentScore(null);}}/>
           <button style={{...btn(!grid||!workingRaw),marginTop:8}} disabled={!grid||!workingRaw} onClick={handleCalcScore}>Calculate Score</button>
           {currentScore !== null && (
             <div style={{marginTop:10,display:"flex",alignItems:"center",gap:8}}>
@@ -316,34 +387,41 @@ function App() {
           )}
         </div>
 
+        {/* Step 3 - Open Time */}
         <div style={card}>
           <div style={{fontWeight:800,fontSize:15,marginBottom:4,color:"#0f172a"}}>3 — Open Time</div>
-          <div style={{fontSize:12,color:"#6b7280",marginBottom:12}}>Select All and Copy the Flica open time page, then paste below. TB trips are filtered automatically.</div>
-          <textarea style={{...inp,height:120,resize:"vertical",fontSize:11}} placeholder="Paste full Flica open time page text here…" value={otPaste} onChange={e=>{setOtPaste(e.target.value);setOpenTime(null);setOtError("");}}/>
-          <button style={{...btn(!otPaste),marginTop:8}} disabled={!otPaste} onClick={handleParseOT}>Parse Open Time</button>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>Paste current month open time. If past the 18th, also paste next month below. TB trips are filtered automatically.</div>
+          <label style={lbl}>Current month</label>
+          <textarea style={{...inp,height:100,resize:"vertical",fontSize:11}} placeholder="Paste current month Flica open time here…" value={ot1Paste} onChange={e=>{setOt1Paste(e.target.value);setOpenTime(null);setOtError("");}}/>
+          <label style={{...lbl,marginTop:12}}>Next month (optional)</label>
+          <textarea style={{...inp,height:80,resize:"vertical",fontSize:11}} placeholder="Paste next month Flica open time here…" value={ot2Paste} onChange={e=>{setOt2Paste(e.target.value);setOpenTime(null);setOtError("");}}/>
+          <button style={{...btn(!ot1Paste),marginTop:8}} disabled={!ot1Paste} onClick={handleParseOT}>Parse Open Time</button>
           {otError && <div style={{color:"#dc2626",fontSize:13,marginTop:8}}>{otError}</div>}
           {openTime && (
             <div style={{marginTop:10,background:"#f8fafc",borderRadius:6,padding:10}}>
               <div style={{fontSize:12,fontWeight:700,color:"#374151",marginBottom:6}}>✓ {openTime.length} available trips</div>
               <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
                 {openTime.map((t,i) => (
-                  <span key={i} style={{fontSize:11,background:"#fff",border:"1px solid #e5e7eb",borderRadius:4,padding:"2px 6px",fontFamily:"monospace"}}>{t.start}·{t.length}d</span>
+                  <span key={i} style={{fontSize:11,background:"#fff",border:"1px solid #e5e7eb",borderRadius:4,padding:"2px 6px",fontFamily:"monospace"}}>
+                    {formatDay(t.start,month1Name,month2Name)}·{t.length}d
+                  </span>
                 ))}
               </div>
             </div>
           )}
         </div>
 
+        {/* Step 4 - Parameters */}
         <div style={card}>
           <div style={{fontWeight:800,fontSize:15,marginBottom:12,color:"#0f172a"}}>4 — Parameters</div>
           <label style={lbl}>Days to pick up (range)</label>
           <div style={{display:"flex",gap:8,alignItems:"center"}}>
-            <input style={{...inp,width:"45%"}} type="number" placeholder="min e.g. 4" value={minDays} onChange={e=>setMinDays(e.target.value)}/>
+            <input style={{...inp,width:"45%"}} type="number" placeholder="min e.g. 16" value={minDays} onChange={e=>setMinDays(e.target.value)}/>
             <span style={{color:"#6b7280",fontSize:13}}>to</span>
-            <input style={{...inp,width:"45%"}} type="number" placeholder="max e.g. 6" value={maxDays} onChange={e=>setMaxDays(e.target.value)}/>
+            <input style={{...inp,width:"45%"}} type="number" placeholder="max e.g. 18" value={maxDays} onChange={e=>setMaxDays(e.target.value)}/>
           </div>
           <label style={{...lbl,marginTop:12}}>Fixed days (can't move)</label>
-          <input style={inp} placeholder="e.g. 30-31" value={fixedRaw} onChange={e=>setFixedRaw(e.target.value)}/>
+          <input style={inp} placeholder="e.g. 30-31 +1-2" value={fixedRaw} onChange={e=>setFixedRaw(e.target.value)}/>
           <label style={{...lbl,marginTop:12}}>Prefer days off (optional)</label>
           <input style={inp} placeholder="e.g. 2-9" value={avoidBefore} onChange={e=>setAvoidBefore(e.target.value)}/>
           <button style={{...btn(!canRun),marginTop:16,width:"100%"}} disabled={!canRun} onClick={handleRun}>
@@ -351,6 +429,7 @@ function App() {
           </button>
         </div>
 
+        {/* Results */}
         {results !== null && (
           <div style={card}>
             <div style={{fontWeight:800,fontSize:15,marginBottom:4,color:"#0f172a"}}>Results</div>
@@ -365,17 +444,19 @@ function App() {
                       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap"}}>
                         <span style={{fontWeight:800,fontSize:14,color:"#0f172a"}}>#{i+1}</span>
                         <span style={{fontSize:12,fontWeight:700,color:"#16a34a"}}>benefit: {r.dropSum - r.addSum}</span>
-                        <span style={{fontSize:11,color:"#6b7280"}}>drop:{r.onlyDrop.join(",")} add:{r.onlyAdd.join(",")}</span>
+                        <span style={{fontSize:11,color:"#6b7280"}}>drop:{r.onlyDrop.map(d=>formatDay(d,month1Name,month2Name)).join(",")} add:{r.onlyAdd.map(d=>formatDay(d,month1Name,month2Name)).join(",")}</span>
                         <span style={{background:"#6b7280",color:"#fff",borderRadius:4,padding:"2px 6px",fontSize:11,fontWeight:700}}>worst:{r.worstBefore}→{r.worstAfter}</span>
                         {r.prefSatisfied && <span style={{background:"#16a34a",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>✓ days off</span>}
-                        {r.prefPartial && <span style={{background:"#ca8a04",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>works {r.prefConflicts.join(",")}</span>}
+                        {r.prefPartial && <span style={{background:"#ca8a04",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>works {r.prefConflicts.map(d=>formatDay(d,month1Name,month2Name)).join(",")}</span>}
                       </div>
                       <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
                         {r.trips.map((t,ti) => (
-                          <span key={ti} style={{fontSize:12,background:"#f1f5f9",borderRadius:4,padding:"3px 8px",fontFamily:"monospace"}}>{t.start}-{t.start+t.length-1} ({t.length}d)</span>
+                          <span key={ti} style={{fontSize:12,background:"#f1f5f9",borderRadius:4,padding:"3px 8px",fontFamily:"monospace"}}>
+                            {formatDay(t.start,month1Name,month2Name)}-{formatDay(t.start+t.length-1,month1Name,month2Name)} ({t.length}d)
+                          </span>
                         ))}
                       </div>
-                      {selected===i && <Calendar trips={r.trips} fixedDays={fixedDaysParsed} preferOff={preferOffParsed} monthStart={parseInt(monthStart)||0}/>}
+                      {selected===i && <Calendar trips={r.trips} fixedDays={fixedDaysParsed} preferOff={preferOffParsed} month1Start={month1Start} month1Name={month1Name} month2Name={month2Name}/>}
                     </div>
                   ))}
                 </div>
