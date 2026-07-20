@@ -13,7 +13,7 @@
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #f1f5f9; font-family: -apple-system, system-ui, sans-serif; }
-textarea, input { font-family: monospace; outline: none; font-size: 16px; }
+textarea, input { font-family: monospace; outline: none; font-size: 16px !important; }
 button { font-family: -apple-system, system-ui, sans-serif; }
 </style>
 </head>
@@ -126,7 +126,11 @@ function parseOpenTime(text, offset) {
 
 // ── optimizer ─────────────────────────────────────────────────────────────────
 function optimize(grid, openTime, minDays, maxDays, droppingDays, fixedDays, preferOff) {
-  const safe = openTime.filter(c => !tripDays(c.start, c.length).some(d => fixedDays.includes(d)));
+  const gridDays = new Set(Object.keys(grid).map(Number));
+  const safe = openTime.filter(c => 
+    !tripDays(c.start, c.length).some(d => fixedDays.includes(d)) &&
+    tripDays(c.start, c.length).every(d => gridDays.has(d))
+  );
   const results = [];
 
   function search(index, chosen, daysUsed) {
@@ -150,7 +154,7 @@ function optimize(grid, openTime, minDays, maxDays, droppingDays, fixedDays, pre
         const dropSum = onlyDrop.reduce((s, d) => s + getBuffer(grid, d), 0);
         const addSum = onlyAdd.reduce((s, d) => s + getBuffer(grid, d), 0);
 
-        if (worstAfter >= worstBefore && addSum <= dropSum) {
+        if (worstAfter >= worstBefore && addSum <= dropSum && (onlyDrop.length > 0 || onlyAdd.length > 0)) {
           results.push({ trips: [...chosen], worstBefore, worstAfter, onlyDrop, onlyAdd, dropSum, addSum });
         }
       }
@@ -170,13 +174,12 @@ function optimize(grid, openTime, minDays, maxDays, droppingDays, fixedDays, pre
 
   const seen = new Set();
   // Filter out results identical to current schedule
-  const droppingSet = droppingDays.slice().sort().join(",");
+  const droppingSet = droppingDays.slice().sort((a,b)=>a-b).join(",");
   const unique = results.filter(r => {
     const key = r.trips.map(t => t.start + "x" + t.length).sort().join("|");
     if (seen.has(key)) return false;
     seen.add(key); return true;
   }).filter(r => {
-    // Remove if new schedule covers exact same days as current
     const newDays = r.trips.flatMap(t => tripDays(t.start, t.length)).sort((a,b)=>a-b).join(",");
     return newDays !== droppingSet;
   });
@@ -343,7 +346,6 @@ function App() {
         <div style={{fontSize:22}}>✈️</div>
         <div>
           <div style={{color:"#f8fafc",fontWeight:800,fontSize:17}}>Endeavor Schedule Optimizer</div>
-          <div style={{color:"#64748b",fontSize:12}}>NYC-CR9-FO</div>
         </div>
       </div>
 
@@ -352,10 +354,10 @@ function App() {
         {/* Step 1 - Reserve Grid */}
         <div style={card}>
           <div style={{fontWeight:800,fontSize:15,marginBottom:4,color:"#0f172a"}}>1 — Reserve Grid</div>
-          <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>Paste current month grid. If you're past the 18th, also paste next month's grid below.</div>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>Paste current month grid. Also paste next month's grid below if needed.</div>
           <label style={lbl}>Current month</label>
           <textarea style={{...inp,height:100,resize:"vertical"}} placeholder={"01AUG\t23\t1\t22\t46\t44\n02AUG\t24\t6\t18\t46\t44"} value={grid1Paste} onChange={e=>setGrid1Paste(e.target.value)}/>
-          <label style={{...lbl,marginTop:12}}>Next month (optional — paste after the 18th)</label>
+          <label style={{...lbl,marginTop:12}}>Next month (optional)</label>
           <textarea style={{...inp,height:80,resize:"vertical"}} placeholder={"01SEP\t30\t2\t28\t47\t45\n02SEP\t31\t3\t28\t47\t45"} value={grid2Paste} onChange={e=>setGrid2Paste(e.target.value)}/>
           <button style={{...btn(!grid1Paste),marginTop:8}} disabled={!grid1Paste} onClick={handleParseGrid}>Parse Grid</button>
           {gridError && <div style={{color:"#dc2626",fontSize:13,marginTop:8}}>{gridError}</div>}
@@ -390,7 +392,7 @@ function App() {
         {/* Step 3 - Open Time */}
         <div style={card}>
           <div style={{fontWeight:800,fontSize:15,marginBottom:4,color:"#0f172a"}}>3 — Open Time</div>
-          <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>Paste current month open time. If past the 18th, also paste next month below. TB trips are filtered automatically.</div>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:8}}>Paste current month open time. Also paste next month below if needed. TB trips are filtered automatically.</div>
           <label style={lbl}>Current month</label>
           <textarea style={{...inp,height:100,resize:"vertical",fontSize:11}} placeholder="Paste current month Flica open time here…" value={ot1Paste} onChange={e=>{setOt1Paste(e.target.value);setOpenTime(null);setOtError("");}}/>
           <label style={{...lbl,marginTop:12}}>Next month (optional)</label>
