@@ -116,10 +116,89 @@ function optimize(grid, openTime, minDays, maxDays, droppingDays, fixedDays, pre
     !tripDays(c.start, c.length).some(d => fixedDays.includes(d)) &&
     tripDays(c.start, c.length).every(d => gridDays.has(d))
   );
+
   const results = [];
   const droppingSet = droppingDays.slice().sort((a,b)=>a-b).join(",");
 
+  // Try every subset of open time trips (up to maxDays total)
   function search(index, chosen, daysUsed) {
+    if (daysUsed >= minDays) {
+      if (!hasOverlap(chosen) && maxConsecutive(chosen, fixedDays) <= 6) {
+        const pickingUpDays = chosen.flatMap(t => tripDays(t.start, t.length));
+        
+        // Days being dropped = in dropping but not in new schedule
+        const onlyDrop = droppingDays.filter(d => !pickingUpDays.includes(d));
+        // Days being added = in new schedule but not in dropping
+        const onlyAdd = pickingUpDays.filter(d => !droppingDays.includes(d));
+
+        // Must actually change something
+        if (onlyDrop.length === 0 && onlyAdd.length === 0) {
+          if (index < safe.length && results.length < 500) {
+            // Keep searching for alternatives
+          }
+          return;
+        }
+
+        const changedDays = [...onlyDrop, ...onlyAdd];
+        let worstBefore = 0, worstAfter = 0;
+        if (changedDays.length > 0) {
+          worstBefore = Infinity; worstAfter = Infinity;
+          for (const d of changedDays) {
+            const buf = getBuffer(grid, d);
+            worstBefore = Math.min(worstBefore, buf);
+            worstAfter = Math.min(worstAfter, onlyDrop.includes(d) ? buf - 1 : buf + 1);
+          }
+        }
+
+        const dropSum = onlyDrop.reduce((s, d) => s + getBuffer(grid, d), 0);
+        const addSum = onlyAdd.reduce((s, d) => s + getBuffer(grid, d), 0);
+
+        if (worstAfter >= worstBefore && addSum <= dropSum) {
+          const newDays = [
+            ...droppingDays.filter(d => pickingUpDays.includes(d)), // kept days
+            ...onlyAdd // new days
+          ].sort((a,b)=>a-b).join(",");
+          if (newDays !== droppingSet) {
+            results.push({ trips: [...chosen], worstBefore, worstAfter, onlyDrop, onlyAdd, dropSum, addSum });
+          }
+        }
+      }
+      if (results.length >= 500) return;
+    }
+    if (index >= safe.length || results.length >= 500) return;
+    for (let i = index; i < safe.length; i++) {
+      const c = safe[i];
+      if (daysUsed + c.length <= maxDays) {
+        chosen.push(c);
+        search(i + 1, chosen, daysUsed + c.length);
+        chosen.pop();
+      }
+    }
+  }
+
+  // Run search starting from each possible number of "kept" dropping days
+  // Key insight: we include dropping days that are also in open time,
+  // but we also need to handle dropping days NOT in open time (kept as-is)
+  // Solution: add "phantom" trips representing current trips being kept
+  
+  // Group dropping days into their original trips
+  // We detect trips by finding consecutive groups within dropping days
+  const sortedDrop = droppingDays.slice().sort((a,b)=>a-b);
+  const currentTrips = [];
+  let i = 0;
+  while (i < sortedDrop.length) {
+    let j = i;
+    while (j + 1 < sortedDrop.length && sortedDrop[j+1] === sortedDrop[j] + 1) j++;
+    currentTrips.push({ start: sortedDrop[i], length: j - i + 1, current: true });
+    i = j + 1;
+  }
+
+  // Build candidate pool: current trips (can keep) + open time trips (can swap in)
+  const allCandidates = [...currentTrips, ...safe];
+  
+  const results2 = [];
+  
+  function search2(index, chosen, daysUsed) {
     if (daysUsed >= minDays) {
       if (!hasOverlap(chosen) && maxConsecutive(chosen, fixedDays) <= 6) {
         const pickingUpDays = chosen.flatMap(t => tripDays(t.start, t.length));
@@ -143,39 +222,43 @@ function optimize(grid, openTime, minDays, maxDays, droppingDays, fixedDays, pre
         const addSum = onlyAdd.reduce((s, d) => s + getBuffer(grid, d), 0);
 
         if (worstAfter >= worstBefore && addSum <= dropSum) {
-          const newDays = chosen.flatMap(t => tripDays(t.start, t.length)).sort((a,b)=>a-b).join(",");
-          if (newDays !== droppingSet) {
-            results.push({ trips: [...chosen], worstBefore, worstAfter, onlyDrop, onlyAdd, dropSum, addSum });
-          }
+          results2.push({ trips: chosen.filter(t => !t.current), worstBefore, worstAfter, onlyDrop, onlyAdd, dropSum, addSum });
         }
       }
-      return;
+      if (results2.length >= 500) return;
     }
-    if (index >= safe.length || results.length > 500) return;
-    for (let i = index; i < safe.length; i++) {
-      const c = safe[i];
+    if (index >= allCandidates.length || results2.length >= 500) return;
+    for (let i = index; i < allCandidates.length; i++) {
+      const c = allCandidates[i];
       if (daysUsed + c.length <= maxDays) {
         chosen.push(c);
-        search(i + 1, chosen, daysUsed + c.length);
+        search2(i + 1, chosen, daysUsed + c.length);
         chosen.pop();
       }
     }
   }
-  search(0, [], 0);
+
+  search2(0, [], 0);
 
   const seen = new Set();
-  const unique = results.filter(r => {
-    const key = r.trips.map(t => t.start + "x" + t.length).sort().join("|");
+  const unique = results2.filter(r => {
+    const key = r.onlyDrop.join(",") + "|" + r.onlyAdd.join(",");
     if (seen.has(key)) return false;
     seen.add(key); return true;
   }).sort((a, b) => (a.addSum - a.dropSum) - (b.addSum - b.dropSum));
 
   unique.forEach(r => {
-    const wd = r.trips.flatMap(t => tripDays(t.start, t.length));
+    const allNewDays = [...droppingDays.filter(d => !r.onlyDrop.includes(d)), ...r.onlyAdd].sort((a,b)=>a-b);
+    const wd = allNewDays;
     const conflicts = preferOff.filter(d => wd.includes(d));
     r.prefSatisfied = preferOff.length > 0 ? conflicts.length === 0 : null;
     r.prefPartial = preferOff.length > 0 ? (conflicts.length > 0 && conflicts.length < preferOff.length) : null;
     r.prefConflicts = conflicts;
+    // Build display trips: kept current trips + new open time trips
+    r.displayTrips = [
+      ...currentTrips.filter(t => !r.onlyDrop.some(d => tripDays(t.start, t.length).includes(d))),
+      ...r.trips
+    ].sort((a,b)=>a.start-b.start);
   });
 
   return unique.slice(0, 50);
@@ -381,11 +464,13 @@ function App() {
                         {r.prefPartial && <span style={{background:"#ca8a04",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>works {r.prefConflicts.join(",")}</span>}
                       </div>
                       <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                        {r.trips.map((t,ti) => (
-                          <span key={ti} style={{fontSize:12,background:"#f1f5f9",borderRadius:4,padding:"3px 8px",fontFamily:"monospace"}}>{t.start}-{t.start+t.length-1} ({t.length}d)</span>
+                        {(r.displayTrips||r.trips).map((t,ti) => (
+                          <span key={ti} style={{fontSize:12,background:r.onlyDrop.some(d=>tripDays(t.start,t.length).includes(d))?"#fee2e2":t.current?"#f1f5f9":"#dcfce7",borderRadius:4,padding:"3px 8px",fontFamily:"monospace",border:t.current?"1px solid #cbd5e1":"1px solid #86efac"}}>
+                            {t.start}-{t.start+t.length-1} ({t.length}d){t.current?" ★":""}
+                          </span>
                         ))}
                       </div>
-                      {selected===i && <Calendar trips={r.trips} fixedDays={fixedDaysParsed} preferOff={preferOffParsed} monthStart={monthStart} monthName={monthName}/>}
+                      {selected===i && <Calendar trips={r.displayTrips||r.trips} fixedDays={fixedDaysParsed} preferOff={preferOffParsed} monthStart={monthStart} monthName={monthName}/>}
                     </div>
                   ))}
                 </div>
