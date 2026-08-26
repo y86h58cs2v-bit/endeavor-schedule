@@ -128,60 +128,114 @@ function optimize(grid, openTime, minDays, maxDays, droppingDays, fixedDays, pre
     i = j + 1;
   }
 
-  // Candidate pool = current trips (can keep) + open time trips (can swap in)
-  // Deduplicate: if an open time trip covers same days as a current trip, keep both
-  const candidates = [...currentTrips, ...safeOT];
-
   const results = [];
   const seen = new Set();
 
-  function search(index, chosen, daysUsed) {
-    if (daysUsed >= minDays) {
-      if (!hasOverlap(chosen) && maxConsecutive(chosen, fixedDays) <= 6) {
-        const pickingUpDays = chosen.flatMap(t => tripDays(t.start, t.length));
-        const onlyDrop = droppingDays.filter(d => !pickingUpDays.includes(d));
-        const onlyAdd = pickingUpDays.filter(d => !droppingDays.includes(d));
+  function evalSchedule(allTrips) {
+    if (hasOverlap(allTrips) || maxConsecutive(allTrips, fixedDays) > 6) return;
+    const totalDays = allTrips.reduce((s,t)=>s+t.length,0);
+    if (totalDays < minDays || totalDays > maxDays) return;
 
-        if (onlyDrop.length === 0 && onlyAdd.length === 0) {
-          // No change — skip but continue searching
-        } else {
-          const changedDays = [...onlyDrop, ...onlyAdd];
-          let worstBefore = Infinity, worstAfter = Infinity;
-          for (const d of changedDays) {
-            const buf = getBuffer(grid, d);
-            worstBefore = Math.min(worstBefore, buf);
-            worstAfter = Math.min(worstAfter, onlyDrop.includes(d) ? buf - 1 : buf + 1);
-          }
-          const dropSum = onlyDrop.reduce((s,d) => s + getBuffer(grid, d), 0);
-          const addSum = onlyAdd.reduce((s,d) => s + getBuffer(grid, d), 0);
-
-          if (worstAfter >= worstBefore && addSum <= dropSum) {
-            const key = onlyDrop.join(',') + '|' + onlyAdd.join(',');
-            if (!seen.has(key)) {
-              seen.add(key);
-              results.push({
-                displayTrips: chosen.slice().sort((a,b)=>a.start-b.start),
-                trips: chosen.filter(t => !t.isCurrent),
-                worstBefore, worstAfter, onlyDrop, onlyAdd, dropSum, addSum
-              });
-            }
-          }
-        }
+    const allNewDays = allTrips.flatMap(t => tripDays(t.start, t.length));
+    const onlyDrop = droppingDays.filter(d => !allNewDays.includes(d));
+    const onlyAdd = allNewDays.filter(d => !droppingDays.includes(d));
+    if (onlyDrop.length === 0 && onlyAdd.length === 0) {
+      const key = 'nochange';
+      if (!seen.has(key)) {
+        seen.add(key);
+        results.push({
+          displayTrips: allTrips.slice().sort((a,b)=>a.start-b.start),
+          worstBefore: 0, worstAfter: 0, onlyDrop: [], onlyAdd: [],
+          dropSum: 0, addSum: 0, noChange: true
+        });
       }
-      if (results.length >= 500) return;
+      return;
     }
-    if (index >= candidates.length || results.length >= 500) return;
-    for (let i = index; i < candidates.length; i++) {
-      const c = candidates[i];
-      if (daysUsed + c.length <= maxDays) {
-        chosen.push(c);
-        search(i + 1, chosen, daysUsed + c.length);
-        chosen.pop();
+    const changedDays = [...onlyDrop, ...onlyAdd];
+    let worstBefore = Infinity, worstAfter = Infinity;
+    for (const d of changedDays) {
+      const buf = getBuffer(grid, d);
+      worstBefore = Math.min(worstBefore, buf);
+      worstAfter = Math.min(worstAfter, onlyDrop.includes(d) ? buf - 1 : buf + 1);
+    }
+    const dropSum = onlyDrop.reduce((s,d) => s + getBuffer(grid, d), 0);
+    const addSum = onlyAdd.reduce((s,d) => s + getBuffer(grid, d), 0);
+
+    if (worstAfter >= worstBefore && addSum <= dropSum) {
+      const key = onlyDrop.join(',') + '|' + onlyAdd.join(',');
+      if (!seen.has(key)) {
+        seen.add(key);
+        results.push({
+          displayTrips: allTrips.slice().sort((a,b)=>a.start-b.start),
+          worstBefore, worstAfter, onlyDrop, onlyAdd, dropSum, addSum
+        });
       }
     }
   }
 
-  search(0, [], 0);
+  // For each subset of current trips to REPLACE, try all OT combinations
+  const n = currentTrips.length;
+  // Try replacing 1 current trip
+  for (let ti = 0; ti < n; ti++) {
+    const kept = currentTrips.filter((_,k) => k !== ti);
+    // Try all single OT trips
+    for (const ot of safeOT) {
+      evalSchedule([...kept, ot]);
+    }
+    // Try all pairs of OT trips
+    for (let a = 0; a < safeOT.length; a++) {
+      for (let b = a+1; b < safeOT.length; b++) {
+        evalSchedule([...kept, safeOT[a], safeOT[b]]);
+      }
+    }
+  }
+
+  // Try replacing 2 current trips
+  for (let ti = 0; ti < n; ti++) {
+    for (let tj = ti+1; tj < n; tj++) {
+      const kept = currentTrips.filter((_,k) => k !== ti && k !== tj);
+      for (const ot of safeOT) {
+        evalSchedule([...kept, ot]);
+      }
+      for (let a = 0; a < safeOT.length; a++) {
+        for (let b = a+1; b < safeOT.length; b++) {
+          evalSchedule([...kept, safeOT[a], safeOT[b]]);
+          for (let c = b+1; c < safeOT.length; c++) {
+            evalSchedule([...kept, safeOT[a], safeOT[b], safeOT[c]]);
+          }
+        }
+      }
+    }
+  }
+
+  // Try replacing 3 current trips
+  for (let ti = 0; ti < n; ti++) {
+    for (let tj = ti+1; tj < n; tj++) {
+      for (let tk = tj+1; tk < n; tk++) {
+        const kept = currentTrips.filter((_,k) => k !== ti && k !== tj && k !== tk);
+        for (let a = 0; a < safeOT.length; a++) {
+          for (let b = a+1; b < safeOT.length; b++) {
+            evalSchedule([...kept, safeOT[a], safeOT[b]]);
+            for (let c = b+1; c < safeOT.length; c++) {
+              evalSchedule([...kept, safeOT[a], safeOT[b], safeOT[c]]);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Try replacing all current trips
+  for (let a = 0; a < safeOT.length; a++) {
+    for (let b = a+1; b < safeOT.length; b++) {
+      for (let c = b+1; c < safeOT.length; c++) {
+        for (let d = c+1; d < safeOT.length; d++) {
+          evalSchedule([safeOT[a], safeOT[b], safeOT[c], safeOT[d]]);
+        }
+      }
+    }
+  }
+
   results.sort((a, b) => (a.addSum - a.dropSum) - (b.addSum - b.dropSum));
 
   results.forEach(r => {
@@ -388,7 +442,10 @@ function App() {
                       style={{border:selected===i?"2px solid #2563eb":"1.5px solid #e5e7eb",borderRadius:8,padding:12,marginBottom:8,cursor:"pointer",background:selected===i?"#eff6ff":"#fff"}}>
                       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap"}}>
                         <span style={{fontWeight:800,fontSize:14,color:"#0f172a"}}>#{i+1}</span>
-                        <span style={{fontSize:12,fontWeight:700,color:"#16a34a"}}>benefit: {r.dropSum-r.addSum}</span>
+                        {r.noChange
+                          ? <span style={{fontSize:12,fontWeight:700,color:"#6b7280"}}>current schedule (no valid swap found)</span>
+                          : <span style={{fontSize:12,fontWeight:700,color:"#16a34a"}}>benefit: {r.dropSum-r.addSum}</span>
+                        }
                         <span style={{fontSize:11,color:"#6b7280"}}>drop:{r.onlyDrop.join(",")} add:{r.onlyAdd.join(",")}</span>
                         <span style={{background:"#6b7280",color:"#fff",borderRadius:4,padding:"2px 6px",fontSize:11,fontWeight:700}}>worst:{r.worstBefore}→{r.worstAfter}</span>
                         {r.prefSatisfied && <span style={{background:"#16a34a",color:"#fff",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>✓ days off</span>}
