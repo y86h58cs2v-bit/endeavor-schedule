@@ -60,13 +60,24 @@ function expandDayList(raw) {
 
 // ── parsers ───────────────────────────────────────────────────────────────────
 function getMonthInfo(text) {
-  const m = text.match(DATE_RE);
-  if (!m) return { monthName: "", startDay: 0 };
-  const monthName = m[2].toUpperCase();
-  const monthIdx = MONTH_MAP[monthName] ?? 0;
+  const monthCount = {};
+  let lastYear = new Date().getFullYear();
   const yearMatch = text.match(/20\d{2}/);
-  const year = yearMatch ? parseInt(yearMatch[0]) : new Date().getFullYear();
-  const startDay = new Date(year, monthIdx, 1).getDay();
+  if (yearMatch) lastYear = parseInt(yearMatch[0]);
+  
+  for (const line of text.split("\n")) {
+    const m = line.match(DATE_RE);
+    if (!m) continue;
+    const name = m[2].toUpperCase();
+    monthCount[name] = (monthCount[name] || 0) + 1;
+  }
+  
+  if (!Object.keys(monthCount).length) return { monthName: "", startDay: 0 };
+  
+  // Use the most common month
+  const monthName = Object.entries(monthCount).sort((a,b)=>b[1]-a[1])[0][0];
+  const monthIdx = MONTH_MAP[monthName] ?? 0;
+  const startDay = new Date(lastYear, monthIdx, 1).getDay();
   return { monthName, startDay };
 }
 
